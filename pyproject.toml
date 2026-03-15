@@ -1,0 +1,111 @@
+[project]
+# TODO(@mathusanm6): Update project name (including in known-first-party) and version.
+name = "PROJECT_NAME"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[tool.ruff]
+# Limit editor window width for better side-by-side file comparison.
+line-length = 80
+
+# Set target Python version to 3.11
+target-version = "py311"
+
+# Exclude common directories
+exclude = [".git", ".github", ".venv", "__pycache__", "build", "dist"]
+
+[tool.ruff.lint]
+# Rules to be enforced
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # Pyflakes
+    "I",   # isort (import sorting)
+    "N",   # pep8-naming
+    "D",   # pydocstyle (docstring conventions)
+    "UP",  # pyupgrade (upgrade syntax)
+    "B",   # flake8-bugbear (potential bugs)
+    "C4",  # flake8-comprehensions
+    "SIM", # flake8-simplify
+    "ANN", # flake8-annotations (type hints)
+    "S",   # flake8-bandit (security)
+    "PTH", # flake8-use-pathlib (pathlib better than os.path)
+    "RET", # flake8-return (better return statements)
+    "ARG", # flake8-unused-arguments
+    "Q",   # flake8-quotes
+    "RUF", # ruff-specific rules
+    "TRY", # flake8-try-except-raise (improve exception handling)
+]
+
+# Ignore specific rules that conflict with Google style
+ignore = [
+    "D203",   # one-blank-line-before-class (conflicts with D211)
+    "D213",   # multi-line-summary-second-line (conflicts with D212)
+    "E501",   # line-too-long (handled by line-length setting)
+    "ANN401", # any-type (sometimes necessary)
+    "D107",   # missing docstring in __init__ (often redundant with class docstring)
+    "COM812", # trailing comma (handled by formatter)
+    "ISC001", # implicit string concat (handled by formatter)
+    "TRY003", # try-except-raise (handled by flake8-try-except-raise)
+]
+
+# Rules that --fix can automatically correct
+fixable = ["ALL"]
+
+# Allow certain violations in specific files
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = [
+    "F401", # Allow unused imports in __init__.py
+    "D104", # Allow missing docstrings in __init__.py
+]
+"test_*.py" = [
+    "D",    # No docstrings in tests
+    "ANN",  # No type hints in tests
+    "S101", # Allow use of assert in tests
+]
+"**/tests/**/*.py" = ["D", "ANN", "S101"]
+
+[tool.ruff.lint.pydocstyle]
+# Use Google docstring convention
+convention = "google"
+
+[tool.ruff.lint.isort]
+# Google-style import ordering
+force-single-line = false
+force-sort-within-sections = true
+lines-after-imports = 2
+
+# Section ordering
+section-order = [
+    "future",
+    "standard-library",
+    "third-party",
+    "first-party",
+    "local-folder",
+]
+known-first-party = ["PROJECT_NAME"]
+
+[tool.ruff.lint.flake8-annotations]
+# Allow dynamically typed expressions like `**kwargs`
+allow-star-arg-any = true
+# Suppress errors for functions returning Any
+suppress-none-returning = true
+
+[tool.ruff.lint.flake8-quotes]
+# Use double quotes for docstrings
+docstring-quotes = "double"
+# Use double quotes for inline strings
+inline-quotes = "double"
+
+[tool.ruff.format]
+# Use double quotes
+quote-style = "double"
+
+# Use spaces for indentation
+indent-style = "space"
+
+# Respect magic trailing comma
+skip-magic-trailing-comma = false
+
+# Prefer line breaks after opening brackets
+line-ending = "auto"

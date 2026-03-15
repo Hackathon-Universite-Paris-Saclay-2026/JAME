@@ -1,0 +1,19 @@
+# CODEOWNERS
+# Owners are requested for review when matching paths are changed.
+# Intentionally no wildcard/default owner; only explicit paths are protected.
+
+# =========================
+# DevOps and CI/CD
+# =========================
+
+# Code ownership policy file
+.github/CODEOWNERS @mathusanm6
+
+# CI/CD workflows
+.github/workflows @mathusanm6
+
+# Python project and lint config
+pyproject.toml @mathusanm6
+
+# Python dependencies
+requirements.txt @mathusanm6
