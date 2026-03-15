@@ -1,0 +1,145 @@
+name: PR Size Policy
+
+on: # yamllint disable-line rule:truthy
+    pull_request:
+        branches: [dev]
+        types: [labeled]
+
+jobs:
+    enforce-xl-limit:
+        name: Enforce XL PR Limit
+        if: startsWith(github.event.label.name, 'size/')
+        runs-on: ubuntu-latest
+        permissions:
+            contents: read
+            pull-requests: write
+
+        env:
+            EXEMPT_SIZE_LABELS: "dataset,jupyter"
+            WARN_ONLY_PATH_PREFIX: ".experimental/users/"
+
+        steps:
+            - name: Enforce PR size policy
+              uses: actions/github-script@v7
+              with:
+                  script: |
+                      const marker = '<!-- pr-size-policy -->';
+                      const addedLabel = context.payload.label?.name || '';
+                      const isXLLabel = addedLabel === 'size/XL';
+                      const exemptSizeLabels = (process.env.EXEMPT_SIZE_LABELS || '')
+                        .split(',')
+                        .map(label => label.trim())
+                        .filter(Boolean);
+                      const warnOnlyPathPrefix = process.env.WARN_ONLY_PATH_PREFIX || '.experimental/users/';
+
+                      const filesToIgnore = [
+                        'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'Cargo.lock',
+                        'composer.lock', 'Pipfile.lock', 'poetry.lock'
+                      ];
+                      const ignoredExtensions = ['.min.js', '.min.css', '.map', '.pyc'];
+                      const ignoredPaths = ['dist/', 'build/', '__pycache__/'];
+
+                      const files = await github.paginate(github.rest.pulls.listFiles, {
+                        owner: context.repo.owner,
+                        repo: context.repo.repo,
+                        pull_number: context.issue.number,
+                        per_page: 100,
+                      });
+
+                      const relevantFiles = files.filter(file => {
+                        const filename = file.filename;
+                        return !(
+                          filesToIgnore.includes(filename) ||
+                          ignoredExtensions.some(ext => filename.endsWith(ext)) ||
+                          ignoredPaths.some(path => filename.includes(path))
+                        );
+                      });
+
+                      const warnOnlyChange =
+                        relevantFiles.length > 0 &&
+                        relevantFiles.every(file => file.filename.startsWith(warnOnlyPathPrefix));
+
+                      const { data: labels } = await github.rest.issues.listLabelsOnIssue({
+                        owner: context.repo.owner,
+                        repo: context.repo.repo,
+                        issue_number: context.issue.number,
+                        per_page: 100,
+                      });
+
+                      const presentExemptLabels = labels
+                        .map(label => label.name)
+                        .filter(name => exemptSizeLabels.includes(name));
+                      const isExempt = presentExemptLabels.length > 0;
+
+                      const comments = await github.paginate(github.rest.issues.listComments, {
+                        owner: context.repo.owner,
+                        repo: context.repo.repo,
+                        issue_number: context.issue.number,
+                        per_page: 100,
+                      });
+
+                      const existingPolicyComment = comments.find(comment =>
+                        comment.body && comment.body.includes(marker),
+                      );
+
+                      if (!isXLLabel) {
+                        if (existingPolicyComment) {
+                          await github.rest.issues.deleteComment({
+                            owner: context.repo.owner,
+                            repo: context.repo.repo,
+                            comment_id: existingPolicyComment.id,
+                          });
+                        }
+
+                        core.info(`PR size policy passed: added size label is ${addedLabel}.`);
+                        return;
+                      }
+
+                      let body;
+                      if (isExempt) {
+                        body = [
+                          marker,
+                          `This PR is labeled size/XL (more than 500 changed lines).`,
+                          `It is allowed because it has an exemption label: ${presentExemptLabels.join(', ')}.`,
+                          `Reviewers should still confirm that the exemption is justified.`,
+                        ].join('\n\n');
+                      } else if (warnOnlyChange) {
+                        body = [
+                          marker,
+                          `This PR is labeled size/XL, which seems too big of a change.`,
+                          `It only touches ${warnOnlyPathPrefix}, so this workflow does not block it.`,
+                          `Consider splitting it into smaller PRs if practical.`,
+                        ].join('\n\n');
+                      } else {
+                        const exemptList = exemptSizeLabels.length > 0
+                          ? exemptSizeLabels.join(', ')
+                          : 'no exemption labels are configured';
+                        body = [
+                          marker,
+                          `This PR is labeled size/XL (more than 500 changed lines), which is forbidden by policy.`,
+                          `This PR is forbidden unless one of the configured exemption labels is applied.`,
+                          `Configured exemption labels: ${exemptList}.`,
+                        ].join('\n\n');
+                      }
+
+                      if (existingPolicyComment) {
+                        await github.rest.issues.updateComment({
+                          owner: context.repo.owner,
+                          repo: context.repo.repo,
+                          comment_id: existingPolicyComment.id,
+                          body,
+                        });
+                      } else {
+                        await github.rest.issues.createComment({
+                          owner: context.repo.owner,
+                          repo: context.repo.repo,
+                          issue_number: context.issue.number,
+                          body,
+                        });
+                      }
+
+                      if (!isExempt && !warnOnlyChange) {
+                        core.setFailed(
+                          `PR size policy failed: PR is labeled size/XL and has no exemption label.`
+                        );
+                      }
