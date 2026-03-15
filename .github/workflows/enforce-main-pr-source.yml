@@ -1,0 +1,31 @@
+name: Enforce PR Source For Main
+
+on:
+    pull_request:
+        branches:
+            - main
+        types:
+            - opened
+            - reopened
+            - synchronize
+            - edited
+
+jobs:
+    allow-only-dev-to-main:
+        name: Allow only dev -> main
+        runs-on: ubuntu-latest
+        steps:
+            - name: Validate PR source branch
+              env:
+                  HEAD_REF: ${{ github.head_ref }}
+                  BASE_REF: ${{ github.base_ref }}
+              run: |
+                  echo "PR source: ${HEAD_REF}"
+                  echo "PR target: ${BASE_REF}"
+
+                  if [ "${HEAD_REF}" != "dev" ]; then
+                    echo "Only pull requests from 'dev' to 'main' are allowed."
+                    exit 1
+                  fi
+
+                  echo "Validation passed: dev -> main"
