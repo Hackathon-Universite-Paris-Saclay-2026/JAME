@@ -6,18 +6,26 @@
 # TODO: Add @kid-emmanuelle once CI/CD workflows are error-free and stable.
 * @mathusanm6
 
-# =========================
+# ===================================
 # DevOps and CI/CD
-# =========================
+# ===================================
 
 # Code ownership policy file
-.github/CODEOWNERS @mathusanm6
+/.github/CODEOWNERS @mathusanm6
 
 # CI/CD workflows
-.github/workflows @mathusanm6
+/.github/workflows @mathusanm6
 
 # Python project and lint config
-pyproject.toml @mathusanm6
+/pyproject.toml @mathusanm6
 
 # Python dependencies
-requirements.txt @mathusanm6
+/requirements.txt @mathusanm6
+
+# ===================================
+# Experimental (Per User Ownership)
+# ===================================
+/.experimental/users/jewinc/** @jewinc
+/.experimental/users/kid-emmanuelle/** @kid-emmanuelle
+/.experimental/users/KoviazinaA/** @KoviazinaA
+/.experimental/users/mathusanm6/** @mathusanm6

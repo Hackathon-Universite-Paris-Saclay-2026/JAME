@@ -12,7 +12,17 @@ line-length = 80
 target-version = "py311"
 
 # Exclude common directories
-exclude = [".git", ".github", ".venv", "__pycache__", "build", "dist"]
+exclude = [
+    ".git",
+    ".github",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "build",
+    "dist",
+    ".experimental",
+    "experimental",
+]
 
 [tool.ruff.lint]
 # Rules to be enforced
