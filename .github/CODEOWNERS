@@ -1,6 +1,10 @@
 # CODEOWNERS
 # Owners are requested for review when matching paths are changed.
-# Intentionally no wildcard/default owner; only explicit paths are protected.
+# Default owner applies to all paths, with explicit path rules below overriding it.
+
+# Team-wide ownership for all files in the repository
+# TODO: Add @kid-emmanuelle once CI/CD workflows are error-free and stable.
+* @mathusanm6
 
 # =========================
 # DevOps and CI/CD
