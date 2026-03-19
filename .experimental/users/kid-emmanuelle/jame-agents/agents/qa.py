@@ -6,8 +6,10 @@ free-form text so the Developer agent can address issues precisely.
 
 from __future__ import annotations
 
+import os
+
 from langchain_core.messages import SystemMessage, HumanMessage
-from langchain_groq import ChatGroq
+from langchain_openai import ChatOpenAI
 
 from state import AgentState, QAResult
 
@@ -132,10 +134,12 @@ def qa_node(state: AgentState) -> dict:
     # ── Act phase: structured output ───────────────────────────
     print("[ACT]  Calling LLM to validate code (structured output) …")
 
-    llm = ChatGroq(
-        model="llama-3.3-70b-versatile",
+    llm = ChatOpenAI(
+        model="deepseek-r1",
         temperature=0.1,
         max_tokens=4096,
+        openai_api_key=os.getenv("SNOWFLAKE_API_KEY"),
+        openai_api_base=os.getenv("SNOWFLAKE_API_BASE"),
     )
 
     qa_passed = False
