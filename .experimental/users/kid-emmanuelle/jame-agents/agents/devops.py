@@ -8,8 +8,10 @@ Responsibilities:
 
 from __future__ import annotations
 
+import os
+
 from langchain_core.messages import SystemMessage, HumanMessage
-from langchain_groq import ChatGroq
+from langchain_openai import ChatOpenAI
 
 from state import AgentState
 
@@ -74,10 +76,12 @@ def devops_node(state: AgentState) -> dict:
     print("⚙️  DEVOPS AGENT — Generating CI/CD & Docker")
     print("=" * 60)
 
-    llm = ChatGroq(
-        model="llama-3.3-70b-versatile",
+    llm = ChatOpenAI(
+        model="deepseek-r1",
         temperature=0.1,
         max_tokens=4096,
+        openai_api_key=os.getenv("SNOWFLAKE_API_KEY"),
+        openai_api_base=os.getenv("SNOWFLAKE_API_BASE"),
     )
 
     specs = state.get("specs", "")
