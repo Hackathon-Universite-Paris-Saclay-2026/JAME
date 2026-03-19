@@ -163,9 +163,9 @@ def print_reasoning_summary(final_state: dict) -> None:
 def main() -> None:
     load_dotenv()
 
-    if not os.getenv("GROQ_API_KEY"):
-        print("❌ Error: GROQ_API_KEY not found.")
-        print("   Copy .env.example to .env and add your Groq API key.")
+    if not os.getenv("SNOWFLAKE_API_KEY"):
+        print("❌ Error: SNOWFLAKE_API_KEY not found.")
+        print("   Copy .env.example to .env and add your Snowflake Cortex credentials.")
         sys.exit(1)
 
     # ── Get user request ───────────────────────────────────────
