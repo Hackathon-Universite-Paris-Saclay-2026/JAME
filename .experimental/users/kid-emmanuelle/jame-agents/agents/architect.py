@@ -8,8 +8,10 @@ Responsibilities:
 
 from __future__ import annotations
 
+import os
+
 from langchain_core.messages import SystemMessage, HumanMessage
-from langchain_groq import ChatGroq
+from langchain_openai import ChatOpenAI
 
 from state import AgentState
 
@@ -54,10 +56,12 @@ def architect_node(state: AgentState) -> dict:
     print("🏛️  ARCHITECT AGENT — Planning & Designing")
     print("=" * 60)
 
-    llm = ChatGroq(
-        model="llama-3.3-70b-versatile",
+    llm = ChatOpenAI(
+        model="deepseek-r1",
         temperature=0.3,
         max_tokens=4096,
+        openai_api_key=os.getenv("SNOWFLAKE_API_KEY"),
+        openai_api_base=os.getenv("SNOWFLAKE_API_BASE"),
     )
 
     user_request = state["user_request"]
