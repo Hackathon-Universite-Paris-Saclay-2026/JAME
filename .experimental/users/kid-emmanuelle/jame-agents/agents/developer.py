@@ -518,7 +518,7 @@ def developer_node(state: AgentState) -> dict:
             file_issues = (
                 f"\n## QA feedback (address what is relevant to this file):\n{qa_feedback}"
             )
-
+        
         user_msg = (
             f"## Application Specifications\n{specs}\n\n"
             f"## File to generate\nPath: `{file_path}`\n\n"
