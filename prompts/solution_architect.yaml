@@ -67,23 +67,92 @@ design:
        - Technical constraints and non-functional requirements
        - Necessary components (DB, cache, queue, storage…)
 
-    2. C4 Diagrams in Mermaid — generate BOTH:
-       - Context diagram (external actors + system boundary)
-       - Container diagram (API, DB, frontend, cache…)
-       - Include a security boundary / trust zone annotation where relevant.
+    2. C4 Diagrams — generate EXACTLY 2 diagrams, each in its own ```mermaid block.
 
-    Output format — use EXACTLY these markers:
+       ── DIAGRAM 1 — C4Context (System Context) ──────────────────────────────
+       Purpose: show WHO uses the system and WHAT it depends on externally.
+       Rules:
+       - ONE System() node for the entire platform — no internals
+       - ONE Person() per human actor who interacts directly with the system
+       - ONE System_Ext() per external system the platform calls or receives from
+       - Every Rel() must have a label AND a protocol (HTTPS, SMTP, OAuth2…)
+
+       Valid keywords: Person, System, System_Ext, Rel
+       ❌ No containers, no databases, no internal components
+
+       ── DIAGRAM 2 — C4Container (Container Diagram) ──────────────────────────
+       Purpose: show HOW the system is built — its deployable units.
+       Rules:
+       - Wrap all internal units in System_Boundary(alias, "Name") {{ ... }}
+       - Use Container() for apps/services, ContainerDb() for databases,
+         ContainerQueue() for queues — each needs: alias, label, technology, description
+       - ⚠️  REDECLARE all Person() and System_Ext() used in Rel() — this diagram
+         is fully standalone, it does NOT inherit declarations from the Context diagram
+       - Every Rel() must have a label AND a protocol
+       - Use Container_Boundary(alias, "Label") {{ ... }} for nested security zones
+         — NEVER use Boundary()
+
+       Valid keywords: System_Boundary, Container, ContainerDb, ContainerQueue,
+                       Container_Boundary, Person, System_Ext, Rel
+       ❌ No classes, functions, or business logic
+
+       ── Mermaid syntax reference ─────────────────────────────────────────────
+
+       ```mermaid
+       C4Context
+         title System Context — MyApp
+         Person(user, "User", "End user of the application")
+         System(myapp, "MyApp", "The system being built")
+         System_Ext(smtp, "Email Provider", "Sends transactional emails")
+         Rel(user, myapp, "Uses", "HTTPS")
+         Rel(myapp, smtp, "Sends emails", "SMTP/TLS")
+       ```
+
+       ```mermaid
+       C4Container
+         title Container Diagram — MyApp
+         System_Boundary(sys, "MyApp") {{
+           Container(web, "Web App", "React", "Frontend UI")
+           Container(api, "API", "Node.js", "REST API")
+           ContainerDb(db, "Database", "PostgreSQL", "Stores all data")
+         }}
+         Person(user, "User", "End user")
+         System_Ext(smtp, "Email Provider", "Sends transactional emails")
+         Rel(user, web, "Uses", "HTTPS")
+         Rel(web, api, "API calls", "REST/HTTPS")
+         Rel(api, db, "Read/write", "SQL/TLS")
+         Rel(api, smtp, "Sends emails", "SMTP/TLS")
+       ```
+
+       ── Output format ─────────────────────────────────────────────────────────
 
     ===SPECS_START===
     <structured specifications>
     ===SPECS_END===
 
     ===DIAGRAMS_START===
-    <Mermaid diagrams, each in a ```mermaid block>
+    ```mermaid
+    C4Context
+      title System Context — <system name>
+      <declarations and relations>
+    ```
+
+    ```mermaid
+    C4Container
+      title Container Diagram — <system name>
+      <declarations and relations>
+    ```
     ===DIAGRAMS_END===
 
-    Rules: exhaustive specs, C4Context/C4Container syntax, label every arrow,
-    mark routes needing auth with [AUTH], no implementation code.
+    ── Final checklist before outputting diagrams ────────────────────────────
+    ✅ Both diagrams wrapped in ```mermaid blocks
+    ✅ No UpdateLayoutConfig, no graph, no flowchart keywords
+    ✅ Every alias used in Rel() is declared in the SAME diagram
+    ✅ Person() and System_Ext() are redeclared in the Container diagram
+    ✅ Container_Boundary used (never Boundary)
+    ✅ Every arrow has a label and a protocol
+    ✅ Mark routes needing auth with [AUTH] in specs
+    ✅ No implementation code
 
   revision: |
     You are the Architect Agent revising your design based on user feedback.
@@ -94,7 +163,48 @@ design:
     Regenerate the FULL architecture incorporating this feedback.
     Keep all previously validated decisions unless explicitly changed.
 
-    Use the same output format with ===SPECS_START=== / ===DIAGRAMS_START=== markers.
+    C4 DIAGRAM RULES (apply on every revision):
+
+       ── DIAGRAM 1 — C4Context (System Context) ──────────────────────────────
+       Purpose: show WHO uses the system and WHAT it depends on externally.
+       Rules:
+       - ONE System() node for the entire platform — no internals
+       - ONE Person() per human actor who interacts directly with the system
+       - ONE System_Ext() per external system the platform calls or receives from
+       - Every Rel() must have a label AND a protocol (HTTPS, SMTP, OAuth2…)
+
+       Valid keywords: Person, System, System_Ext, Rel
+       ❌ No containers, no databases, no internal components
+
+       ── DIAGRAM 2 — C4Container (Container Diagram) ──────────────────────────
+       Purpose: show HOW the system is built — its deployable units.
+       Rules:
+       - Wrap all internal units in System_Boundary(alias, "Name") {{ ... }}
+       - Use Container() for apps/services, ContainerDb() for databases,
+         ContainerQueue() for queues — each needs: alias, label, technology, description
+       - ⚠️  REDECLARE all Person() and System_Ext() used in Rel() — this diagram
+         is fully standalone, it does NOT inherit declarations from the Context diagram
+       - Every Rel() must have a label AND a protocol
+       - Use Container_Boundary(alias, "Label") {{ ... }} for nested security zones
+         — NEVER use Boundary()
+
+       Valid keywords: System_Boundary, Container, ContainerDb, ContainerQueue,
+                       Container_Boundary, Person, System_Ext, Rel
+       ❌ No classes, functions, or business logic
+
+    Apply the SAME C4 diagram rules as the initial design:
+    - DIAGRAM 1 (C4Context): Person, System, System_Ext, Rel only — no internals
+    - DIAGRAM 2 (C4Container): System_Boundary{{ Container/ContainerDb/ContainerQueue }}
+      + redeclare ALL Person() and System_Ext() used in Rel() in this diagram
+    - Container_Boundary for nested security zones — NEVER Boundary()
+    - Every Rel() has a label and protocol
+    - Each diagram wrapped in a ```mermaid block
+    - No UpdateLayoutConfig, no graph, no flowchart
+    - Every alias used in Rel() must be declared in the SAME diagram
+
+    CRITICAL: output BOTH sections every revision, even if diagrams are unchanged:
+    - ===SPECS_START=== ... ===SPECS_END===
+    - ===DIAGRAMS_START=== ... ===DIAGRAMS_END===
 
   # Lightweight design for function/feature scope (no C4 diagrams)
   lightweight: |
