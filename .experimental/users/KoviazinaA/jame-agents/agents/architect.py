@@ -231,7 +231,7 @@ def _validate(llm: ChatOpenAI, specs: str, diagrams: str) -> tuple[bool, Optiona
 # ──────────────────────────────────────────────────────────────────────────────
 
 def architect_node(state: AgentState) -> dict:
-    """AIDL-compliant architect node — drop-in for kid-emmanuelle's pipeline."""
+    """AIDL-compliant architect node """
 
     print("\n" + "=" * 60)
     print("🏛️  ARCHITECT AGENT")
@@ -295,7 +295,9 @@ def architect_node(state: AgentState) -> dict:
         if thinking:
             print(f"\n[THINKING — design {iteration}]\n" + thinking + "\n" + "─" * 60)
 
-        specs, diagrams = _parse_output(raw)
+        new_specs, new_diagrams = _parse_output(raw)
+        specs = new_specs if new_specs else specs
+        diagrams = new_diagrams if new_diagrams else diagrams  # keep previous if revision omitted diagrams
 
         reasoning_logs.append({"agent": "architect", "phase": "act",
                                 "content": f"Iteration {iteration}: {len(specs)}c specs, {len(diagrams)}c diagrams."})
@@ -305,15 +307,22 @@ def architect_node(state: AgentState) -> dict:
             approved = True
             break
 
+        # Skip quality + validation on last iteration — just use the design as-is
+        if iteration == MAX_DESIGN_ITERATIONS:
+            approved = True
+            break
+
         # [QUALITY] Self-critique — let user decide whether to fix
         issues = _self_critique(llm, specs, diagrams)
         reasoning_logs.append({"agent": "architect", "phase": "quality",
                                 "content": f"Self-critique: {len(issues)} issue(s).",
                                 "issues": issues})
 
-        if issues and iteration < MAX_DESIGN_ITERATIONS:
+        if issues:
             print("[QUALITY] Fix these issues before validation? (y = fix / n = continue anyway)")
-            fix_answer = input("    ➜ ").strip().lower()
+            fix_answer = ""
+            while not fix_answer:
+                fix_answer = input("    ➜ ").strip().lower()
             if fix_answer in ("y", "yes", "oui", "o"):
                 feedback = "Fix the following issues:\n" + "\n".join(f"- {i}" for i in issues)
                 memory = _maybe_compress(llm, f"Quality issues: {feedback}", memory)
