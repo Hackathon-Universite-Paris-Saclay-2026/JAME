@@ -1,4 +1,4 @@
-"""Architect Agent — AIDL-compliant
+"""Architect Agent
 
 Uses the same AgentState / return keys (specs, diagrams, reasoning_logs).
 
@@ -19,6 +19,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
+import yaml
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
@@ -30,20 +31,26 @@ from state import AgentState
 
 MAX_DESIGN_ITERATIONS = 3
 COMPRESS_THRESHOLD    = 5000
-PROMPTS_DIR           = Path(__file__).parent.parent / "prompts"
+PROMPTS_FILE          = Path(__file__).parent.parent / "prompts" / "solution_architect.yaml"
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Prompts (loaded from prompts/)
+# Prompts (loaded from prompts/solution_architect.yaml)
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _load(name: str) -> str:
-    return (PROMPTS_DIR / name).read_text(encoding="utf-8")
+def _load_prompts() -> dict:
+    with open(PROMPTS_FILE, encoding="utf-8") as f:
+        return yaml.safe_load(f)
 
-INTERROGATION_PROMPT = _load("interrogation.md")
-DESIGN_PROMPT        = _load("design.md")
-VALIDATION_PROMPT    = _load("validation.md")
-COMPRESS_PROMPT      = _load("compress.md")
-REVISION_PROMPT      = _load("revision.md")
+_PROMPTS = _load_prompts()
+
+SCOPE_CLASSIFIER_PROMPT    = _PROMPTS["analysis"]["scope_classifier"]
+INTERROGATION_ROUND_PROMPT = _PROMPTS["analysis"]["interrogation_round"]
+DESIGN_PROMPT              = _PROMPTS["design"]["initial"]
+DESIGN_LIGHTWEIGHT_PROMPT  = _PROMPTS["design"]["lightweight"]
+REVISION_PROMPT            = _PROMPTS["design"]["revision"]
+SELF_CRITIQUE_PROMPT       = _PROMPTS["quality"]["self_critique"]
+VALIDATION_PROMPT          = _PROMPTS["interaction"]["validation"]
+COMPRESS_PROMPT            = _PROMPTS["memory"]["compress"]
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -67,34 +74,85 @@ def _strip_thinking(text: str) -> tuple[str, str]:
     return "", text
 
 
-def _parse_questions(raw: str) -> list[str]:
-    try:
-        qs = json.loads(raw)
-        return qs if isinstance(qs, list) else []
-    except json.JSONDecodeError:
-        match = re.search(r'\[.*?\]', raw, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group())
-            except json.JSONDecodeError:
-                pass
-    return []
+MAX_INTERROGATION_ROUNDS = 3
+
+def _parse_json_response(raw: str, fallback: dict) -> dict:
+    """Extract JSON from LLM response, stripping markdown fences if needed."""
+    raw = raw.strip()
+    # strip ```json ... ``` fences
+    match = re.search(r'\{.*\}', raw, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group())
+        except json.JSONDecodeError:
+            pass
+    return fallback
 
 
-def _ask_questions(questions: list[str]) -> list[dict]:
+def _classify_scope(llm: ChatOpenAI, user_request: str) -> tuple[str, bool]:
+    """Return (scope, needs_interrogation)."""
+    resp = llm.invoke([
+        SystemMessage(content=SCOPE_CLASSIFIER_PROMPT),
+        HumanMessage(content=user_request),
+    ])
+    _, raw = _strip_thinking(resp.content)
+    result = _parse_json_response(raw, {"scope": "system", "needs_interrogation": True})
+    scope = result.get("scope", "system")
+    needs = result.get("needs_interrogation", True)
+    print(f"[PLAN] Scope detected: {scope} | Interrogation needed: {needs}")
+    return scope, needs
+
+
+def _ask_questions(questions: list[str], round_num: int, max_rounds: int) -> list[dict]:
     if not questions:
         return []
     print("\n" + "─" * 60)
-    print("[CLARIFY] Questions to refine the design:")
+    print(f"[CLARIFY] Round {round_num}/{max_rounds} — {len(questions)} question(s):")
     print("─" * 60)
     pairs = []
     for i, q in enumerate(questions, 1):
-        print(f"  [{i}/{len(questions)}] {q}")
+        print(f"  [{i}] {q}")
         answer = input("    ➜ ").strip()
         pairs.append({"question": q, "answer": answer or "No preference / not applicable"})
         print()
     print("─" * 60)
     return pairs
+
+
+def _interrogation_loop(llm: ChatOpenAI, user_request: str) -> list[dict]:
+    """Run up to MAX_INTERROGATION_ROUNDS rounds of 4 questions each."""
+    all_qa: list[dict] = []
+
+    for round_num in range(1, MAX_INTERROGATION_ROUNDS + 1):
+        print(f"[ACT]  Interrogation round {round_num}/{MAX_INTERROGATION_ROUNDS} …")
+
+        previous_qa_text = "\n".join(
+            f"Q: {qa['question']}\nA: {qa['answer']}" for qa in all_qa
+        ) if all_qa else "None yet."
+
+        prompt = INTERROGATION_ROUND_PROMPT.format(
+            round=round_num,
+            max_rounds=MAX_INTERROGATION_ROUNDS,
+            user_request=user_request,
+            previous_qa=previous_qa_text,
+        )
+        resp = llm.invoke([HumanMessage(content=prompt)])
+        thinking, raw = _strip_thinking(resp.content)
+        if thinking:
+            print(f"[THINKING — interrogation r{round_num}]\n" + thinking + "\n" + "─" * 60)
+
+        result = _parse_json_response(raw, {"questions": [], "done": True})
+        questions = result.get("questions", [])[:4]
+        done = result.get("done", False)
+
+        round_qa = _ask_questions(questions, round_num, MAX_INTERROGATION_ROUNDS)
+        all_qa.extend(round_qa)
+
+        if done or not questions:
+            print(f"[CLARIFY] ✅ Interrogation complete after {round_num} round(s).\n")
+            break
+
+    return all_qa
 
 
 def _build_context(user_request: str, clarifications: list[dict]) -> str:
@@ -130,13 +188,33 @@ def _parse_output(raw: str) -> tuple[str, str]:
     return specs, diagrams
 
 
+def _self_critique(llm: ChatOpenAI, specs: str, diagrams: str) -> list[str]:
+    """Check design coherence. Returns list of issues found (empty = all good)."""
+    print("[QUALITY] Running self-critique …")
+    resp = llm.invoke([
+        HumanMessage(content=SELF_CRITIQUE_PROMPT.format(
+            specs=specs[:3000], diagrams=diagrams[:1000]
+        ))
+    ])
+    _, raw = _strip_thinking(resp.content)
+    result = _parse_json_response(raw, {"issues": [], "has_issues": False})
+    issues = result.get("issues", [])
+    if issues:
+        print(f"[QUALITY] ⚠️  {len(issues)} issue(s) found:")
+        for issue in issues:
+            print(f"    • {issue}")
+        print()
+    else:
+        print("[QUALITY] ✅ Design is coherent.\n")
+    return issues
+
+
 def _validate(llm: ChatOpenAI, specs: str, diagrams: str) -> tuple[bool, Optional[str]]:
     print("\n" + "=" * 60)
     print("[VALIDATE] Presenting design for approval …")
     print("=" * 60)
     resp = llm.invoke([
-        SystemMessage(content=VALIDATION_PROMPT),
-        HumanMessage(content=f"## Specs\n{specs[:2000]}\n\n## Diagrams\n{diagrams[:500]}"),
+        HumanMessage(content=VALIDATION_PROMPT.format(specs=specs)),
     ])
     _, review = _strip_thinking(resp.content)
     print("\n" + review)
@@ -164,27 +242,21 @@ def architect_node(state: AgentState) -> dict:
     memory         = ""
     reasoning_logs = []
 
-    # [LOG] PLAN
+    # [PLAN] Classify scope
     print(f"\n[PLAN] Analysing: '{user_request}'")
     reasoning_logs.append({"agent": "architect", "phase": "plan",
                             "content": f"Analysing: '{user_request}'"})
 
-    # [ANALYSE] Interrogation
-    print("[ACT]  Generating clarification questions …")
-    q_resp = llm.invoke([
-        SystemMessage(content=INTERROGATION_PROMPT),
-        HumanMessage(content=f"Application:\n{user_request}"),
-    ])
-    thinking, q_raw = _strip_thinking(q_resp.content)
-    if thinking:
-        print("[THINKING — interrogation]\n" + thinking + "\n" + "─" * 60)
+    scope, needs_interrogation = _classify_scope(llm, user_request)
+    reasoning_logs.append({"agent": "architect", "phase": "classify",
+                            "content": f"scope={scope}, interrogation={needs_interrogation}"})
 
-    questions = _parse_questions(q_raw)
-    reasoning_logs.append({"agent": "architect", "phase": "clarify",
-                            "content": f"{len(questions)} clarification questions generated."})
-
-    # [VALIDATE] Q&A with user
-    clarifications = _ask_questions(questions)
+    # [ANALYSE] Iterative interrogation (system/product only)
+    clarifications: list[dict] = []
+    if needs_interrogation:
+        clarifications = _interrogation_loop(llm, user_request)
+        reasoning_logs.append({"agent": "architect", "phase": "clarify",
+                                "content": f"{len(clarifications)} clarification(s) collected."})
 
     # [MEMORY] Build & compress context
     context = _build_context(user_request, clarifications)
@@ -195,15 +267,22 @@ def architect_node(state: AgentState) -> dict:
     specs = diagrams = ""
     approved = False
     feedback = ""
+    is_lightweight = scope in ("function", "feature")
 
     for iteration in range(1, MAX_DESIGN_ITERATIONS + 1):
         print(f"[ACT]  Design iteration {iteration}/{MAX_DESIGN_ITERATIONS} …")
 
         if iteration == 1:
-            messages = [
-                SystemMessage(content=DESIGN_PROMPT.format(memory_section=memory_section)),
-                HumanMessage(content=context),
-            ]
+            if is_lightweight:
+                messages = [
+                    SystemMessage(content=DESIGN_LIGHTWEIGHT_PROMPT.format(scope=scope)),
+                    HumanMessage(content=context),
+                ]
+            else:
+                messages = [
+                    SystemMessage(content=DESIGN_PROMPT.format(memory_section=memory_section)),
+                    HumanMessage(content=context),
+                ]
         else:
             messages = [
                 SystemMessage(content=REVISION_PROMPT.format(
@@ -221,7 +300,26 @@ def architect_node(state: AgentState) -> dict:
         reasoning_logs.append({"agent": "architect", "phase": "act",
                                 "content": f"Iteration {iteration}: {len(specs)}c specs, {len(diagrams)}c diagrams."})
 
-        # [VALIDATE] User approval
+        # [VALIDATE] User approval — only for system/product
+        if is_lightweight:
+            approved = True
+            break
+
+        # [QUALITY] Self-critique — let user decide whether to fix
+        issues = _self_critique(llm, specs, diagrams)
+        reasoning_logs.append({"agent": "architect", "phase": "quality",
+                                "content": f"Self-critique: {len(issues)} issue(s).",
+                                "issues": issues})
+
+        if issues and iteration < MAX_DESIGN_ITERATIONS:
+            print("[QUALITY] Fix these issues before validation? (y = fix / n = continue anyway)")
+            fix_answer = input("    ➜ ").strip().lower()
+            if fix_answer in ("y", "yes", "oui", "o"):
+                feedback = "Fix the following issues:\n" + "\n".join(f"- {i}" for i in issues)
+                memory = _maybe_compress(llm, f"Quality issues: {feedback}", memory)
+                memory_section = f"## Memory / previous context\n{memory}\n"
+                continue
+
         approved, feedback = _validate(llm, specs, diagrams)
         if approved:
             break
