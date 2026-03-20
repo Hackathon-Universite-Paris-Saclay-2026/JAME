@@ -558,7 +558,7 @@ def developer_node(state: AgentState) -> dict:
             })
             print(f"         ✓ {len(content)} chars")
         else:
-            print(f"         ✗ Empty content, skipping")
+            print("         ✗ Empty content, skipping")
 
     # On retry, merge: preserve old files that were not regenerated.
     if iteration > 0 and existing_files:

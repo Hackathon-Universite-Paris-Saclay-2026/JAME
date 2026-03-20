@@ -1,21 +1,21 @@
 # =======================================================================
-# This file lists the dependencies required for this project.
+# Corrected Requirements
 # =======================================================================
 
 # Formatting / linting
-ruff==0.14.13   # pinned to avoid breaking CI
+ruff==0.14.13
 
 # --- Web framework ---
 fastapi==0.111.0
 uvicorn[standard]==0.29.0
 
-# --- LangChain / LangGraph ---
-langgraph==0.2.0
-langchain-core==0.3.0
-langchain-openai==0.2.0
+# --- LangChain / LangGraph (0.3 ecosystem) ---
+langgraph>=0.3.0
+langchain-core>=0.3.0
+langchain-openai>=0.2.0
 
 # --- Data validation ---
-pydantic==2.7.1
+pydantic>=2.7.4
 
 # --- Configuration ---
 python-dotenv==1.0.1

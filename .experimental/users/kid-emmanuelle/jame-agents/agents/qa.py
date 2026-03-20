@@ -76,7 +76,7 @@ def qa_node(state: AgentState) -> dict:
         issues = [
             {"file": "GENERAL", "severity": "critical", "description": "No code files were generated. Generate all mandatory files."}
         ]
-        print(f"\n[PLAN] Checking code files … found 0 files.")
+        print("\n[PLAN] Checking code files … found 0 files.")
         print("[ACT]  IMMEDIATE FAIL — no code files in state.")
         print(f"[REASON] {feedback}\n")
 
