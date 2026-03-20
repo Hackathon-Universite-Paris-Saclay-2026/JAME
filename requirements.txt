@@ -1,6 +1,0 @@
-# =======================================================================
-# This file lists the dependencies required for this project.
-# =======================================================================
-
-# Formatting / linting
-ruff==0.14.13   # pinned to avoid breaking CI
