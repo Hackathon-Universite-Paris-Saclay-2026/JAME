@@ -18,10 +18,26 @@ decision:
     Analyze the application specifications and source file list below.
     Decide whether the project needs a CI pipeline and/or containerized CD artifacts.
 
-    Rules:
-    - needs_ci=true  -> project has tests, dependencies, or is multi-file
-    - needs_cd=true  -> project exposes a network service (API, web server, worker)
-    - needs_cd=false -> project is a pure library, utility function, or script with no server
+    ## needs_ci rules
+
+    needs_ci=true ONLY when the project has multiple source files that import from each other
+    (i.e. a real module graph exists between production files).
+
+    needs_ci=false when the project is a single self-contained function or script, even if:
+    - a test file exists alongside it
+    - the function has a requirements.txt
+    - the spec mentions edge cases or input validation
+
+    Decision guide:
+    - Single function / pure utility (e.g. fibonacci, string formatter, math helper) → false
+    - Library with multiple modules importing each other                              → true
+    - Service or application with routes, models, services, utils split across files  → true
+    - Script that calls external APIs but is a single file                            → false
+
+    ## needs_cd rules
+
+    needs_cd=true  -> project exposes a persistent network service (API, web server, worker, daemon)
+    needs_cd=false -> pure function, library, script, or CLI tool with no server
 
 # ─── ACT PHASE ────────────────────────────────────────────────────────────────
 

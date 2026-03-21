@@ -37,8 +37,8 @@ _ACTIONS = _PROMPTS["actions"]  # pinned SHAs — edit prompts/devops.yaml to up
 class DevOpsDecision(BaseModel):
     needs_ci: bool = Field(
         description=(
-            "True if the project needs a CI pipeline. "
-            "True for any project with tests, dependencies, or multiple files."
+            "True only if the project has multiple source files that import from each other. "
+            "False for a single function, utility, or script — even when a test file exists."
         )
     )
     needs_cd: bool = Field(
