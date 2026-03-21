@@ -4,3 +4,25 @@
 
 # Formatting / linting
 ruff==0.14.13   # pinned to avoid breaking CI
+
+# --- Web framework ---
+fastapi
+uvicorn[standard]
+
+# --- LangChain / LangGraph ---
+langgraph
+langchain-core
+langchain-openai
+
+# --- Data validation ---
+pydantic
+
+# --- Configuration ---
+python-dotenv
+
+# --- Testing ---
+pytest
+pytest-cov
+pytest-asyncio
+httpx
+anyio
