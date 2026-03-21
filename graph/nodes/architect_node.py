@@ -41,10 +41,12 @@ def architect_node(state: AgentState) -> dict:
     # ── Act phase ───────────────────────────────────────────────
     print("[ACT]  Calling LLM to generate specifications and diagrams …")
 
-    response = llm.invoke([
-        SystemMessage(content=ARCHITECT_SYSTEM_PROMPT),
-        HumanMessage(content=f"Application to design:\n\n{user_request}"),
-    ])
+    response = llm.invoke(
+        [
+            SystemMessage(content=ARCHITECT_SYSTEM_PROMPT),
+            HumanMessage(content=f"Application to design:\n\n{user_request}"),
+        ]
+    )
 
     raw = response.content
 
@@ -53,19 +55,23 @@ def architect_node(state: AgentState) -> dict:
     diagrams = ""
 
     if "===SPECS_START===" in raw and "===SPECS_END===" in raw:
-        specs = raw.split("===SPECS_START===")[1].split("===SPECS_END===")[0].strip()
+        specs = (
+            raw.split("===SPECS_START===")[1]
+            .split("===SPECS_END===")[0]
+            .strip()
+        )
     else:
         specs = raw  # fallback: treat the entire output as specs
 
     if "===DIAGRAMS_START===" in raw and "===DIAGRAMS_END===" in raw:
         diagrams = (
-            raw.split("===DIAGRAMS_START===")[1].split("===DIAGRAMS_END===")[0].strip()
+            raw.split("===DIAGRAMS_START===")[1]
+            .split("===DIAGRAMS_END===")[0]
+            .strip()
         )
 
     # ── Reason phase ────────────────────────────────────────────
-    reason_trace = (
-        f"Produced {len(specs)} chars of specs and {len(diagrams)} chars of diagrams."
-    )
+    reason_trace = f"Produced {len(specs)} chars of specs and {len(diagrams)} chars of diagrams."
     print(f"[REASON] {reason_trace}\n")
 
     return {
@@ -73,7 +79,11 @@ def architect_node(state: AgentState) -> dict:
         "diagrams": diagrams,
         "reasoning_logs": [
             {"agent": "architect", "phase": "plan", "content": plan_trace},
-            {"agent": "architect", "phase": "act", "content": "Generated specs and C4 diagrams."},
+            {
+                "agent": "architect",
+                "phase": "act",
+                "content": "Generated specs and C4 diagrams.",
+            },
             {"agent": "architect", "phase": "reason", "content": reason_trace},
         ],
     }
