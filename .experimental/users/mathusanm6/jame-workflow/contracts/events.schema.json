@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "jame-workflow/events.schema.json",
+  "title": "JAME Workflow Run Events",
+  "type": "object",
+  "required": ["run_id", "event", "message", "timestamp"],
+  "properties": {
+    "run_id": {"type": "string"},
+    "event": {
+      "type": "string",
+      "enum": [
+        "run_started",
+        "agent_started",
+        "agent_update",
+        "artifact_created",
+        "run_completed",
+        "run_failed",
+        "error"
+      ]
+    },
+    "agent": {"type": ["string", "null"]},
+    "phase": {"type": ["string", "null"]},
+    "message": {"type": "string"},
+    "timestamp": {"type": "string", "format": "date-time"},
+    "payload": {"type": "object"}
+  },
+  "additionalProperties": false
+}
