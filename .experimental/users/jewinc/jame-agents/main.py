@@ -217,6 +217,12 @@ def save_artifacts(final_state: dict) -> None:
         (PROJECT_DIR / "Makefile").write_text(makefile, encoding="utf-8")
         print("  🛠️  Makefile  → output/project/Makefile")
 
+    # ── Save .env.example ──────────────────────────────────────
+    env_example = final_state.get("env_example", "")
+    if env_example:
+        (PROJECT_DIR / ".env.example").write_text(env_example, encoding="utf-8")
+        print("  🔑 Env       → output/project/.env.example")
+
     # ── Save .gitignore ────────────────────────────────────────
     gitignore = final_state.get("gitignore", "")
     if gitignore:
@@ -334,6 +340,7 @@ def main() -> None:
         "pyproject_toml":      "",
         "makefile":            "",
         "gitignore":           "",
+        "env_example":         "",
         "needs_cd":            False,
         "qa_passed":           False,
         "qa_feedback":         "",

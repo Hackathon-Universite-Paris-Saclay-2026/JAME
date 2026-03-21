@@ -109,6 +109,7 @@ class AgentState(TypedDict):
     pyproject_toml: str         # pyproject.toml (ruff config + project metadata)
     makefile: str               # Makefile (local dev targets)
     gitignore: str              # .gitignore
+    env_example: str            # .env.example (connection strings with placeholder values)
     needs_cd: bool              # True if CD artifacts were generated
 
     # ── QA outputs ──────────────────────────────────────────────

@@ -169,6 +169,7 @@ def devops_node(state: AgentState) -> dict:
     pyproject_toml   = _extract_block(raw, "===PYPROJECT_START===",       "===PYPROJECT_END===")
     makefile         = _extract_block(raw, "===MAKEFILE_START===",        "===MAKEFILE_END===")
     gitignore        = _extract_block(raw, "===GITIGNORE_START===",       "===GITIGNORE_END===")
+    env_example      = _extract_block(raw, "===ENV_EXAMPLE_START===",     "===ENV_EXAMPLE_END===")
 
     # ── Reason phase ─────────────────────────────────────────────────────────
     parts = [f"CI/CD YAML: {len(cicd_yaml)} chars"]
@@ -184,6 +185,7 @@ def devops_node(state: AgentState) -> dict:
         f"pyproject.toml: {len(pyproject_toml)} chars",
         f"Makefile: {len(makefile)} chars",
         f".gitignore: {len(gitignore)} chars",
+        f".env.example: {len(env_example)} chars",
     ]
     reason_trace = ", ".join(parts) + "."
     print(f"[REASON] {reason_trace}\n")
@@ -198,6 +200,7 @@ def devops_node(state: AgentState) -> dict:
         "pyproject_toml":      pyproject_toml,
         "makefile":            makefile,
         "gitignore":           gitignore,
+        "env_example":         env_example,
         "needs_cd":            decision.needs_cd,
         "reasoning_logs": [
             {"agent": "devops", "phase": "plan",   "content": plan_trace},
