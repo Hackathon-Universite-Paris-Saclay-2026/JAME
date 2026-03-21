@@ -18,5 +18,5 @@ def load_prompts(name: str) -> dict[str, Any]:
     Returns:
         Parsed YAML content as a dict.
     """
-    with open(_PROMPTS_DIR / f"{name}.yaml", encoding="utf-8") as fh:
+    with (_PROMPTS_DIR / f"{name}.yaml").open(encoding="utf-8") as fh:
         return yaml.safe_load(fh)
