@@ -223,17 +223,18 @@ def save_artifacts(final_state: dict) -> None:
         (PROJECT_DIR / ".env.example").write_text(env_example, encoding="utf-8")
         print("  🔑 Env       → output/project/.env.example")
 
-    # ── Save .gitignore ────────────────────────────────────────
-    gitignore = final_state.get("gitignore", "")
-    if gitignore:
-        (PROJECT_DIR / ".gitignore").write_text(gitignore, encoding="utf-8")
-    else:
-        (PROJECT_DIR / ".gitignore").write_text(_PYTHON_GITIGNORE, encoding="utf-8")
-    print("  📄 Gitignore → output/project/.gitignore")
+    # ── Save .gitignore (only when CI was generated) ───────────
+    if cicd:
+        gitignore = final_state.get("gitignore", "")
+        if gitignore:
+            (PROJECT_DIR / ".gitignore").write_text(gitignore, encoding="utf-8")
+        else:
+            (PROJECT_DIR / ".gitignore").write_text(_PYTHON_GITIGNORE, encoding="utf-8")
+        print("  📄 Gitignore → output/project/.gitignore")
 
-    # ── Initialize git repository ──────────────────────────────
-    _init_git_repo(PROJECT_DIR)
-    print("  🗂️  Git      → output/project/ initialized with first commit")
+        # ── Initialize git repository ──────────────────────────
+        _init_git_repo(PROJECT_DIR)
+        print("  🗂️  Git      → output/project/ initialized with first commit")
 
     # ── Save reasoning trace ───────────────────────────────────
     logs = final_state.get("reasoning_logs", [])
