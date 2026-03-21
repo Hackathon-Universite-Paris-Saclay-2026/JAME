@@ -108,6 +108,7 @@ class AgentState(TypedDict):
     requirements_dev: str       # requirements-dev.txt (dev dependencies)
     pyproject_toml: str         # pyproject.toml (ruff config + project metadata)
     makefile: str               # Makefile (local dev targets)
+    gitignore: str              # .gitignore
     needs_cd: bool              # True if CD artifacts were generated
 
     # ── QA outputs ──────────────────────────────────────────────

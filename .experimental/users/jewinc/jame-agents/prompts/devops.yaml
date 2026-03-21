@@ -5,9 +5,9 @@
 # Verified 2025 — update when bumping action versions
 
 actions:
-  checkout:     "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"      # v4.2.2
-  setup_python: "actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b"  # v5.3.0
-  cache:        "actions/cache@1bd1e32a3bdc45362d1e726936510720a7c6158d"          # v4.2.0
+  checkout:     "actions/checkout@v4"
+  setup_python: "actions/setup-python@v5"
+  cache:        "actions/cache@v4"
 
 # ─── DECISION PHASE ───────────────────────────────────────────────────────────
 
@@ -68,10 +68,8 @@ act:
       5. run: pip install -r requirements-dev.txt
       6. run: pytest --tb=short
       7. run: pip-audit
-      8. run: bandit -r . -q
 
     ### Rules
-    - ALL action references MUST use the full commit SHA — never @v3, @v4, or @main
     - The workflow must be valid YAML that runs on GitHub Actions without modification
 
     ## requirements.txt requirements
@@ -90,7 +88,6 @@ act:
     ```
     pytest>=8
     ruff>=0.9
-    bandit>=1.8
     pip-audit>=2.8
     ```
 
@@ -133,6 +130,42 @@ act:
     line-ending = "auto"
     ```
 
+    ## .gitignore requirements
+
+    Emit this file verbatim:
+    ```
+    # Python
+    __pycache__/
+    *.py[cod]
+    *.pyo
+    *.pyd
+    *.egg-info/
+    dist/
+    build/
+    .eggs/
+
+    # Virtual environments
+    venv/
+    .venv/
+    env/
+
+    # Environment & secrets
+    .env
+    .env.*
+    !.env.example
+
+    # Tools
+    .mypy_cache/
+    .ruff_cache/
+    .pytest_cache/
+    .coverage
+    htmlcov/
+
+    # IDE
+    .idea/
+    .vscode/
+    ```
+
     ## Makefile requirements
 
     - CRITICAL: recipe lines MUST start with a real TAB character (\t), never spaces
@@ -150,9 +183,8 @@ act:
         format                    → ruff format .  (inside venv)
         lint-with-auto-fix        → ruff check . --fix  (inside venv)
         lint-with-auto-unsafe-fix → ruff check . --fix --unsafe-fixes  (inside venv)
-        security-check            → bandit -r . -q  (inside venv)
         test                      → pytest --tb=short  (inside venv)
-        check                     → $(MAKE) lint-with-auto-fix && $(MAKE) security-check && $(MAKE) test
+        check                     → $(MAKE) lint-with-auto-fix && $(MAKE) test
 
   ci_only: |
     You are the DevOps Agent of a multi-agent software factory.
@@ -181,6 +213,10 @@ act:
     ===MAKEFILE_START===
     <Makefile content — plain text, no code fence>
     ===MAKEFILE_END===
+
+    ===GITIGNORE_START===
+    <.gitignore content — plain text, no code fence>
+    ===GITIGNORE_END===
 
   full: |
     You are the DevOps Agent of a multi-agent software factory.
@@ -225,6 +261,10 @@ act:
     ===MAKEFILE_START===
     <Makefile content — plain text, no code fence>
     ===MAKEFILE_END===
+
+    ===GITIGNORE_START===
+    <.gitignore content — plain text, no code fence>
+    ===GITIGNORE_END===
 
     ## Dockerfile requirements (mandatory)
 

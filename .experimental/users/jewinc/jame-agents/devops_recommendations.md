@@ -92,6 +92,36 @@ class DevOpsDecision(BaseModel):
 
 Then select the prompt template based on the detected stack (Python, Node, or mixed), generating the appropriate CI steps, Makefile targets, and config files (`pyproject.toml` vs `.eslintrc` + `.prettierrc`) per language.
 
+### B9 — Bandit static security analysis
+
+Add `bandit` to the generated project for Python security scanning. Bandit does **not** auto-discover `.bandit` — the config file must be passed explicitly with `--ini`.
+
+**requirements-dev.txt**: add `bandit>=1.8`
+
+**`.bandit`** config (place in project root):
+```ini
+[bandit]
+exclude_dirs = ['venv', '.venv', 'env', '__pycache__', 'build', 'dist', '.eggs', 'tests']
+```
+
+**Makefile** — add a `security-check` target:
+```makefile
+security-check:
+	@echo "Running security scan..."
+	@source venv/bin/activate && bandit -r . -q --ini .bandit
+```
+
+**CI** (`test` job) — add after `pip-audit`:
+```yaml
+- run: bandit -r . -q --ini .bandit
+```
+
+**`check` target** — chain it in:
+```makefile
+check:
+	$(MAKE) lint-with-auto-fix && $(MAKE) security-check && $(MAKE) test
+```
+
 ### B7 — `Makefile` DX artifact
 
 Generate a `Makefile` alongside the other artifacts for developer convenience:

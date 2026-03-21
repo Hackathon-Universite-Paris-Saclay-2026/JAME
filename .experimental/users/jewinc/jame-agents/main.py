@@ -8,7 +8,11 @@ Usage:
     python main.py --input input/spec.md --github         # create GitHub repo (auto-named)
     python main.py --input input/spec.md --github my-repo # create GitHub repo (named)
     python main.py --input input/spec.md --github --private  # private repo
+    python main.py --input input/simple_function_specifications.md --github 
 """
+
+
+
 
 from __future__ import annotations
 
@@ -213,8 +217,12 @@ def save_artifacts(final_state: dict) -> None:
         (PROJECT_DIR / "Makefile").write_text(makefile, encoding="utf-8")
         print("  🛠️  Makefile  → output/project/Makefile")
 
-    # ── Write .gitignore (static Python template) ──────────────
-    (PROJECT_DIR / ".gitignore").write_text(_PYTHON_GITIGNORE, encoding="utf-8")
+    # ── Save .gitignore ────────────────────────────────────────
+    gitignore = final_state.get("gitignore", "")
+    if gitignore:
+        (PROJECT_DIR / ".gitignore").write_text(gitignore, encoding="utf-8")
+    else:
+        (PROJECT_DIR / ".gitignore").write_text(_PYTHON_GITIGNORE, encoding="utf-8")
     print("  📄 Gitignore → output/project/.gitignore")
 
     # ── Initialize git repository ──────────────────────────────
@@ -325,6 +333,7 @@ def main() -> None:
         "requirements_dev":    "",
         "pyproject_toml":      "",
         "makefile":            "",
+        "gitignore":           "",
         "needs_cd":            False,
         "qa_passed":           False,
         "qa_feedback":         "",
