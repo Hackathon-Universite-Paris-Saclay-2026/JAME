@@ -68,6 +68,30 @@ Add a SHA-256 checksum step after build:
 - run: sha256sum dist/* > dist/checksums.txt
 ```
 
+### B8 — Multi-language CI/CD support (JS/TS/HTML/CSS)
+
+The agent assumes Python for all tooling. Non-Python projects silently produce broken or no-op CI:
+
+| Tool | Python | JS/TS | CSS/HTML |
+|------|--------|-------|----------|
+| Linter | `ruff check .` | ESLint | stylelint |
+| Formatter | `ruff format .` | Prettier | Prettier |
+| Test runner | `pytest` | Jest / Vitest | — |
+| Audit | `pip-audit` | `npm audit` | — |
+| Security | `bandit` | — | — |
+
+To fix this, extend `DevOpsDecision` with a `languages` field:
+
+```python
+class DevOpsDecision(BaseModel):
+    needs_ci: bool
+    needs_cd: bool
+    languages: list[str] = Field(description="Detected languages, e.g. ['python'], ['typescript', 'css']")
+    reasoning: str
+```
+
+Then select the prompt template based on the detected stack (Python, Node, or mixed), generating the appropriate CI steps, Makefile targets, and config files (`pyproject.toml` vs `.eslintrc` + `.prettierrc`) per language.
+
 ### B7 — `Makefile` DX artifact
 
 Generate a `Makefile` alongside the other artifacts for developer convenience:

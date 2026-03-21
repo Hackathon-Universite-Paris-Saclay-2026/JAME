@@ -9,20 +9,27 @@ Responsibilities:
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
+import yaml
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
 from state import AgentState
 
-# ── Pinned GitHub Actions SHAs ───────────────────────────────────────────────
-# Verified 2025 — update when bumping action versions
-_ACTIONS = {
-    "checkout":     "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",      # v4.2.2
-    "setup-python": "actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b",  # v5.3.0
-    "cache":        "actions/cache@1bd1e32a3bdc45362d1e726936510720a7c6158d",          # v4.2.0
-}
+# ── Prompts (loaded from prompts/devops.yaml) ────────────────────────────────
+
+_PROMPTS_FILE = Path(__file__).parent.parent / "prompts" / "devops.yaml"
+
+
+def _load_prompts() -> dict:
+    with open(_PROMPTS_FILE, encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+_PROMPTS = _load_prompts()
+_ACTIONS = _PROMPTS["actions"]  # pinned SHAs — edit prompts/devops.yaml to update
 
 
 # ── Decision model ───────────────────────────────────────────────────────────
@@ -45,174 +52,17 @@ class DevOpsDecision(BaseModel):
     reasoning: str = Field(description="One-sentence justification for this decision.")
 
 
-_DECISION_PROMPT = """\
-You are the DevOps Agent of a multi-agent software factory.
+_DECISION_PROMPT = _PROMPTS["decision"]["classify"]
 
-Analyze the application specifications and source file list below.
-Decide whether the project needs a CI pipeline and/or containerized CD artifacts.
+_sha = dict(
+    checkout=_ACTIONS["checkout"],
+    setup_python=_ACTIONS["setup_python"],
+    cache=_ACTIONS["cache"],
+)
+_shared = _PROMPTS["act"]["shared"]
 
-Rules:
-- needs_ci=true  -> project has tests, dependencies, or is multi-file
-- needs_cd=true  -> project exposes a network service (API, web server, worker)
-- needs_cd=false -> project is a pure library, utility function, or script with no server
-"""
-
-
-# ── CI-only system prompt ────────────────────────────────────────────────────
-
-_CI_PROMPT = f"""\
-You are the DevOps Agent of a multi-agent software factory.
-
-Generate a GitHub Actions CI workflow for this project.
-Return your output in EXACTLY this format (no other text):
-
-===CICD_START===
-```yaml
-<GitHub Actions workflow YAML>
-```
-===CICD_END===
-
-## CI Workflow requirements (mandatory)
-
-### Triggers
-- push to main
-- pull_request to main
-
-### Concurrency (cancel duplicate runs on the same branch)
-```yaml
-concurrency:
-  group: ci-${{{{ github.ref }}}}
-  cancel-in-progress: true
-```
-
-### Matrix
-- Python versions: ["3.11", "3.12"]
-
-### Steps (in this exact order)
-1. uses: {_ACTIONS["checkout"]}
-2. uses: {_ACTIONS["setup-python"]}
-   with:
-     python-version: ${{{{ matrix.python-version }}}}
-3. uses: {_ACTIONS["cache"]}
-   with:
-     path: ~/.cache/pip
-     key: ${{{{ runner.os }}}}-pip-${{{{ hashFiles('**/requirements*.txt') }}}}
-     restore-keys: |
-       ${{{{ runner.os }}}}-pip-
-4. run: pip install -r requirements.txt
-5. run: pip install ruff pytest pip-audit bandit
-6. run: ruff check .
-7. run: pytest --tb=short
-8. run: pip-audit
-9. run: bandit -r . -q
-
-### Rules
-- ALL action references MUST use the full commit SHA shown above — never @v3, @v4, or @main
-- The workflow must be valid YAML that runs on GitHub Actions without modification
-"""
-
-
-# ── Full CI + CD system prompt ───────────────────────────────────────────────
-
-_FULL_PROMPT = f"""\
-You are the DevOps Agent of a multi-agent software factory.
-
-Generate all CI/CD artifacts for this project.
-Return your output in EXACTLY this format and order (no other text):
-
-===CICD_START===
-```yaml
-<GitHub Actions workflow YAML>
-```
-===CICD_END===
-
-===DOCKERFILE_START===
-```dockerfile
-<Dockerfile content>
-```
-===DOCKERFILE_END===
-
-===COMPOSE_START===
-```yaml
-<docker-compose.yml content>
-```
-===COMPOSE_END===
-
-===DOCKERIGNORE_START===
-<.dockerignore content — plain text, no code fence>
-===DOCKERIGNORE_END===
-
-## CI Workflow requirements (mandatory)
-
-### Triggers
-- push to main
-- pull_request to main
-
-### Concurrency
-```yaml
-concurrency:
-  group: ci-${{{{ github.ref }}}}
-  cancel-in-progress: true
-```
-
-### Matrix
-- Python versions: ["3.11", "3.12"]
-
-### Steps (in this exact order)
-1. uses: {_ACTIONS["checkout"]}
-2. uses: {_ACTIONS["setup-python"]}
-   with:
-     python-version: ${{{{ matrix.python-version }}}}
-3. uses: {_ACTIONS["cache"]}
-   with:
-     path: ~/.cache/pip
-     key: ${{{{ runner.os }}}}-pip-${{{{ hashFiles('**/requirements*.txt') }}}}
-     restore-keys: |
-       ${{{{ runner.os }}}}-pip-
-4. run: pip install -r requirements.txt
-5. run: pip install ruff pytest pip-audit bandit
-6. run: ruff check .
-7. run: pytest --tb=short
-8. run: pip-audit
-9. run: bandit -r . -q
-
-ALL action references MUST use the full commit SHA shown above — never @v3, @v4, or @main.
-
-## Dockerfile requirements (mandatory)
-
-- Multi-stage build: stage 1 (builder) installs all deps; stage 2 (final) copies only runtime
-- Final stage base: python:3.12-slim
-- Layer-cache order: COPY requirements.txt -> RUN pip install -> COPY source code
-- Create a non-root user with useradd and switch with USER
-- Add a HEALTHCHECK instruction
-- EXPOSE the correct port derived from the specs
-- CMD to start the application
-- Never run as root, never hardcode credentials
-
-## docker-compose.yml requirements
-
-- Single service named after the application
-- build: . (build from local Dockerfile)
-- Port mapping matching the exposed port
-- env_file: .env
-- restart: unless-stopped
-
-## .dockerignore requirements
-
-Must exclude (one entry per line, no comments):
-.env
-venv/
-__pycache__/
-.git/
-*.pyc
-*.pyo
-tests/
-*.md
-.mypy_cache/
-dist/
-build/
-*.egg-info/
-"""
+_CI_PROMPT   = (_PROMPTS["act"]["ci_only"] + _shared).format(**_sha)
+_FULL_PROMPT = (_PROMPTS["act"]["full"]    + _shared).format(**_sha)
 
 
 # ── Extraction helper ────────────────────────────────────────────────────────
@@ -310,10 +160,14 @@ def devops_node(state: AgentState) -> dict:
     ])
     raw = response.content
 
-    cicd_yaml      = _extract_block(raw, "===CICD_START===",         "===CICD_END===")
-    dockerfile     = _extract_block(raw, "===DOCKERFILE_START===",   "===DOCKERFILE_END===")   if decision.needs_cd else ""
-    docker_compose = _extract_block(raw, "===COMPOSE_START===",      "===COMPOSE_END===")      if decision.needs_cd else ""
-    dockerignore   = _extract_block(raw, "===DOCKERIGNORE_START===", "===DOCKERIGNORE_END===") if decision.needs_cd else ""
+    cicd_yaml        = _extract_block(raw, "===CICD_START===",            "===CICD_END===")
+    dockerfile       = _extract_block(raw, "===DOCKERFILE_START===",      "===DOCKERFILE_END===")      if decision.needs_cd else ""
+    docker_compose   = _extract_block(raw, "===COMPOSE_START===",         "===COMPOSE_END===")         if decision.needs_cd else ""
+    dockerignore     = _extract_block(raw, "===DOCKERIGNORE_START===",    "===DOCKERIGNORE_END===")    if decision.needs_cd else ""
+    requirements     = _extract_block(raw, "===REQUIREMENTS_START===",    "===REQUIREMENTS_END===")
+    requirements_dev = _extract_block(raw, "===REQUIREMENTS_DEV_START===","===REQUIREMENTS_DEV_END===")
+    pyproject_toml   = _extract_block(raw, "===PYPROJECT_START===",       "===PYPROJECT_END===")
+    makefile         = _extract_block(raw, "===MAKEFILE_START===",        "===MAKEFILE_END===")
 
     # ── Reason phase ─────────────────────────────────────────────────────────
     parts = [f"CI/CD YAML: {len(cicd_yaml)} chars"]
@@ -323,6 +177,12 @@ def devops_node(state: AgentState) -> dict:
             f"docker-compose: {len(docker_compose)} chars",
             f".dockerignore: {len(dockerignore)} chars",
         ]
+    parts += [
+        f"requirements.txt: {len(requirements)} chars",
+        f"requirements-dev.txt: {len(requirements_dev)} chars",
+        f"pyproject.toml: {len(pyproject_toml)} chars",
+        f"Makefile: {len(makefile)} chars",
+    ]
     reason_trace = ", ".join(parts) + "."
     print(f"[REASON] {reason_trace}\n")
 
@@ -331,6 +191,10 @@ def devops_node(state: AgentState) -> dict:
         "dockerfile":          dockerfile,
         "docker_compose_yaml": docker_compose,
         "dockerignore":        dockerignore,
+        "requirements":        requirements,
+        "requirements_dev":    requirements_dev,
+        "pyproject_toml":      pyproject_toml,
+        "makefile":            makefile,
         "needs_cd":            decision.needs_cd,
         "reasoning_logs": [
             {"agent": "devops", "phase": "plan",   "content": plan_trace},

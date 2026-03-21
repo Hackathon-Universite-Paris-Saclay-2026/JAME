@@ -104,6 +104,10 @@ class AgentState(TypedDict):
     dockerfile: str             # Dockerfile
     docker_compose_yaml: str    # docker-compose.yml for local deployment
     dockerignore: str           # .dockerignore content
+    requirements: str           # requirements.txt (runtime dependencies)
+    requirements_dev: str       # requirements-dev.txt (dev dependencies)
+    pyproject_toml: str         # pyproject.toml (ruff config + project metadata)
+    makefile: str               # Makefile (local dev targets)
     needs_cd: bool              # True if CD artifacts were generated
 
     # ── QA outputs ──────────────────────────────────────────────

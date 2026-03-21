@@ -189,6 +189,30 @@ def save_artifacts(final_state: dict) -> None:
         (PROJECT_DIR / ".dockerignore").write_text(dockerignore, encoding="utf-8")
         print("  🐳 Ignore    → output/project/.dockerignore")
 
+    # ── Save requirements.txt ──────────────────────────────────
+    requirements = final_state.get("requirements", "")
+    if requirements:
+        (PROJECT_DIR / "requirements.txt").write_text(requirements, encoding="utf-8")
+        print("  📦 Deps      → output/project/requirements.txt")
+
+    # ── Save requirements-dev.txt ──────────────────────────────
+    requirements_dev = final_state.get("requirements_dev", "")
+    if requirements_dev:
+        (PROJECT_DIR / "requirements-dev.txt").write_text(requirements_dev, encoding="utf-8")
+        print("  📦 Dev deps  → output/project/requirements-dev.txt")
+
+    # ── Save pyproject.toml ────────────────────────────────────
+    pyproject_toml = final_state.get("pyproject_toml", "")
+    if pyproject_toml:
+        (PROJECT_DIR / "pyproject.toml").write_text(pyproject_toml, encoding="utf-8")
+        print("  🔧 Ruff cfg  → output/project/pyproject.toml")
+
+    # ── Save Makefile ──────────────────────────────────────────
+    makefile = final_state.get("makefile", "")
+    if makefile:
+        (PROJECT_DIR / "Makefile").write_text(makefile, encoding="utf-8")
+        print("  🛠️  Makefile  → output/project/Makefile")
+
     # ── Write .gitignore (static Python template) ──────────────
     (PROJECT_DIR / ".gitignore").write_text(_PYTHON_GITIGNORE, encoding="utf-8")
     print("  📄 Gitignore → output/project/.gitignore")
@@ -205,57 +229,6 @@ def save_artifacts(final_state: dict) -> None:
             encoding="utf-8",
         )
         print("  🧠 Trace     → output/reasoning_trace.json")
-
-    # ── Save QA issues ─────────────────────────────────────────
-    qa_issues = final_state.get("qa_issues", [])
-    if qa_issues:
-        (OUTPUT_DIR / "qa_issues.json").write_text(
-            json.dumps(qa_issues, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        print("  🎫 QA Issues → output/qa_issues.json")
-
-    # ── README_WARNING.md if QA never passed ───────────────────
-    qa_passed = final_state.get("qa_passed", False)
-    iteration = final_state.get("iteration", 0)
-    max_iterations = final_state.get("max_iterations", 2)
-
-    if not qa_passed and iteration >= max_iterations:
-        warning_lines = [
-            "# ⚠️ WARNING: Code Quality Not Verified",
-            "",
-            f"The QA agent did **not pass** after {iteration} iteration(s) "
-            f"(max: {max_iterations}).",
-            "",
-            "The generated code may be **incomplete or non-compliant** with the "
-            "original specifications. Review the issues below before using this code.",
-            "",
-            "## Outstanding Issues",
-            "",
-        ]
-
-        if qa_issues:
-            for iss in qa_issues:
-                sev = iss.get("severity", "unknown").upper()
-                file = iss.get("file", "GENERAL")
-                desc = iss.get("description", "No description")
-                warning_lines.append(f"- **[{sev}]** `{file}`: {desc}")
-        else:
-            feedback = final_state.get("qa_feedback", "No details available.")
-            warning_lines.append(feedback)
-
-        warning_lines.extend([
-            "",
-            "## Recommendation",
-            "",
-            "1. Review each issue above.",
-            "2. Fix the code manually or re-run the pipeline with adjusted specs.",
-            "3. Run tests: `cd backend && pytest`",
-        ])
-
-        warning_path = PROJECT_DIR / "README_WARNING.md"
-        warning_path.write_text("\n".join(warning_lines), encoding="utf-8")
-        print("  ⚠️  Warning  → output/project/README_WARNING.md")
 
 
 def print_reasoning_summary(final_state: dict) -> None:
@@ -348,6 +321,10 @@ def main() -> None:
         "dockerfile":          "",
         "docker_compose_yaml": "",
         "dockerignore":        "",
+        "requirements":        "",
+        "requirements_dev":    "",
+        "pyproject_toml":      "",
+        "makefile":            "",
         "needs_cd":            False,
         "qa_passed":           False,
         "qa_feedback":         "",
@@ -371,17 +348,6 @@ def main() -> None:
 
     # ── Summary ────────────────────────────────────────────────
     print_reasoning_summary(final_state)
-
-    qa_passed = final_state.get("qa_passed", False)
-    if qa_passed:
-        print("\n" + "=" * 60)
-        print("✅ Pipeline complete! All QA checks passed.")
-        print("=" * 60 + "\n")
-    else:
-        print("\n" + "=" * 60)
-        print("⚠️  Pipeline complete with QA warnings. See output/project/README_WARNING.md")
-        print("=" * 60 + "\n")
-
 
 if __name__ == "__main__":
     main()
