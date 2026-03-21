@@ -6,9 +6,9 @@ API credentials are sourced from environment variables in a single place.
 
 from __future__ import annotations
 
-import os
-
 from langchain_openai import ChatOpenAI
+
+from config import settings
 
 
 def get_cortex_llm(
@@ -34,18 +34,14 @@ def get_cortex_llm(
     Raises:
         EnvironmentError: If either required environment variable is unset.
     """
-    api_key = os.getenv("SNOWFLAKE_API_KEY")
-    api_base = os.getenv("SNOWFLAKE_API_BASE")
+    api_key = settings.snowflake_api_key
+    api_base = settings.snowflake_api_base
 
     if not api_key:
-        raise OSError(
-            "SNOWFLAKE_API_KEY environment variable is not set. "
-            "Add it to your .env file."
-        )
+        raise OSError("SNOWFLAKE_API_KEY is not set. Add it to your .env file.")
     if not api_base:
         raise OSError(
-            "SNOWFLAKE_API_BASE environment variable is not set. "
-            "Add it to your .env file."
+            "SNOWFLAKE_API_BASE is not set. Add it to your .env file."
         )
 
     return ChatOpenAI(
