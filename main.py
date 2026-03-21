@@ -12,7 +12,7 @@ app = FastAPI(
     title="JAME - Multi-Agent Software Engineering",
     description=(
         "Generates full-stack applications via a LangGraph "
-        "multi-agent pipeline (PM → Developer → QA → DevOps)."
+        "multi-agent pipeline (Architect → Developer → QA → DevOps)."
     ),
     version="0.1.0",
 )
