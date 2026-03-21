@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import os
-
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api import generate
+from config import settings
 
 
 app = FastAPI(
@@ -32,6 +31,6 @@ app.include_router(generate.router)
 if __name__ == "__main__":
     import uvicorn
 
-    host = os.getenv("JAME_HOST", "127.0.0.1")
-    port = int(os.getenv("JAME_PORT", "8000"))
+    host = settings.host
+    port = settings.port
     uvicorn.run("backend.main:app", host=host, port=port, reload=True)
