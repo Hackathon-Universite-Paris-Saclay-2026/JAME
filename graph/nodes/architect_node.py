@@ -1,22 +1,233 @@
-"""Architect node — Master Plan + task dispatch.
+"""Architect node — Full AIDL-compliant design flow.
 
-Responsibilities:
-  1. Parse the user request into structured specifications.
-  2. Identify modules, API routes, data models, and user journeys.
-  3. Generate C4 Context and Container diagrams in Mermaid syntax.
+Flow:
+  1. Classify scope (function / feature / system / product).
+  2. Interrogation - up to 3 rounds of Q&A for system/product scope.
+  3. Design - full C4 (system/product) or lightweight spec (function/feature).
+  4. Self-critique - automated internal consistency check.
+  5. User validation loop - up to MAX_DESIGN_ITERATIONS revisions.
+  6. Memory compression when context exceeds threshold.
 """
 
 from __future__ import annotations
 
+import json
+import re
+
+from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from graph.prompts.architect_prompts import ARCHITECT_SYSTEM_PROMPT
+from graph.prompts.architect_prompts import (
+    DESIGN_INITIAL_PROMPT,
+    DESIGN_LIGHTWEIGHT_PROMPT,
+    DESIGN_REVISION_PROMPT,
+    INTERROGATION_ROUND_PROMPT,
+    MEMORY_COMPRESS_PROMPT,
+    SCOPE_CLASSIFIER_PROMPT,
+    SELF_CRITIQUE_PROMPT,
+    VALIDATION_PROMPT,
+)
 from graph.state import AgentState
 from integrations.cortex import get_cortex_llm
 
 
+MAX_INTERROGATION_ROUNDS = 3
+MAX_DESIGN_ITERATIONS = 3
+COMPRESS_THRESHOLD = 5000
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+
+def _strip_thinking(text: str) -> tuple[str, str]:
+    if "<think>" in text and "</think>" in text:
+        thinking = text.split("<think>")[1].split("</think>")[0].strip()
+        content = text.split("</think>", 1)[-1].strip()
+        return thinking, content
+    return "", text
+
+
+def _parse_json(raw: str) -> dict:
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group())
+            except json.JSONDecodeError:
+                pass
+    return {}
+
+
+def _build_context(user_request: str, clarifications: list[dict]) -> str:
+    lines = [f"## Application request\n{user_request}"]
+    if clarifications:
+        lines.append("## Clarifications")
+        for qa in clarifications:
+            lines.append(f"Q: {qa['question']}\nA: {qa['answer']}")
+    return "\n\n".join(lines)
+
+
+def _compress(llm: BaseChatModel, context: str) -> str:
+    print("[MEMORY] Context too large — compressing …")
+    resp = llm.invoke(
+        [HumanMessage(content=MEMORY_COMPRESS_PROMPT.format(context=context))]
+    )
+    _, compressed = _strip_thinking(resp.content)
+    print("[MEMORY] Compressed.\n")
+    return compressed
+
+
+def _maybe_compress(llm: BaseChatModel, context: str, memory: str) -> str:
+    full = (memory + "\n\n" + context).strip()
+    return _compress(llm, full) if len(full) > COMPRESS_THRESHOLD else full
+
+
+def _parse_output(raw: str) -> tuple[str, str]:
+    specs = diagrams = ""
+    if "===SPECS_START===" in raw and "===SPECS_END===" in raw:
+        specs = (
+            raw.split("===SPECS_START===")[1]
+            .split("===SPECS_END===")[0]
+            .strip()
+        )
+    else:
+        specs = raw
+    if "===DIAGRAMS_START===" in raw and "===DIAGRAMS_END===" in raw:
+        diagrams = (
+            raw.split("===DIAGRAMS_START===")[1]
+            .split("===DIAGRAMS_END===")[0]
+            .strip()
+        )
+    return specs, diagrams
+
+
+# ── Sub-phases ────────────────────────────────────────────────────────────────
+
+
+def _classify_scope(llm: BaseChatModel, user_request: str) -> tuple[str, bool]:
+    """Call the LLM to classify scope and decide whether interrogation is needed."""
+    print("[ACT]  Classifying request scope …")
+    resp = llm.invoke(
+        [
+            SystemMessage(content=SCOPE_CLASSIFIER_PROMPT),
+            HumanMessage(content=user_request),
+        ]
+    )
+    _, raw = _strip_thinking(resp.content)
+    data = _parse_json(raw)
+    scope = data.get("scope", "system")
+    needs_interrogation = data.get(
+        "needs_interrogation", scope in ("system", "product")
+    )
+    print(f"[ACT]  Scope: {scope} | needs_interrogation: {needs_interrogation}")
+    return scope, needs_interrogation
+
+
+def _interrogate(
+    llm: BaseChatModel, user_request: str, max_rounds: int
+) -> list[dict]:
+    """Run up to max_rounds of Q&A with the user to clarify ambiguities."""
+    clarifications: list[dict] = []
+    for round_num in range(1, max_rounds + 1):
+        previous_qa = (
+            "\n".join(
+                f"Q: {c['question']}\nA: {c['answer']}" for c in clarifications
+            )
+            or "None yet."
+        )
+        resp = llm.invoke(
+            [
+                SystemMessage(
+                    content=INTERROGATION_ROUND_PROMPT.format(
+                        round=round_num,
+                        max_rounds=max_rounds,
+                        user_request=user_request,
+                        previous_qa=previous_qa,
+                    )
+                ),
+                HumanMessage(
+                    content="Generate the next set of clarification questions."
+                ),
+            ]
+        )
+        _, raw = _strip_thinking(resp.content)
+        data = _parse_json(raw)
+        questions: list[str] = data.get("questions", [])
+        done: bool = data.get("done", False)
+
+        if not questions or done:
+            print(f"[ACT]  Interrogation complete after round {round_num}.")
+            break
+
+        print("\n" + "─" * 60)
+        print(f"[CLARIFY] Round {round_num}/{max_rounds}:")
+        print("─" * 60)
+        for i, q in enumerate(questions, 1):
+            print(f"  [{i}] {q}")
+            answer = input("    ➜ ").strip() or "No preference / not applicable"
+            clarifications.append({"question": q, "answer": answer})
+            print()
+        print("─" * 60)
+
+        if done:
+            break
+
+    return clarifications
+
+
+def _self_critique(llm: BaseChatModel, specs: str, diagrams: str) -> list[str]:
+    """Ask the LLM to self-review the design for inconsistencies."""
+    print("[ACT]  Running self-critique …")
+    resp = llm.invoke(
+        [
+            HumanMessage(
+                content=SELF_CRITIQUE_PROMPT.format(
+                    specs=specs, diagrams=diagrams
+                )
+            ),
+        ]
+    )
+    _, raw = _strip_thinking(resp.content)
+    data = _parse_json(raw)
+    issues: list[str] = data.get("issues", [])
+    if issues:
+        print(f"[REASON] Self-critique found {len(issues)} issue(s): {issues}")
+    else:
+        print("[REASON] Self-critique passed — design is coherent.")
+    return issues
+
+
+def _validate_with_user(
+    llm: BaseChatModel, specs: str, diagrams: str
+) -> tuple[bool, str | None]:
+    """Present the design summary to the user and collect approval or feedback."""
+    print("\n" + "=" * 60)
+    print("[VALIDATE] Presenting design for approval …")
+    print("=" * 60)
+    resp = llm.invoke(
+        [
+            SystemMessage(content=VALIDATION_PROMPT.format(specs=specs)),
+            HumanMessage(content=f"## Diagrams\n{diagrams[:1000]}"),
+        ]
+    )
+    _, review = _strip_thinking(resp.content)
+    print("\n" + review)
+    answer = input("\n    ➜ ").strip()
+    print()
+    if answer.lower() in ("y", "yes", "oui", "ok", "approve", "approved", ""):
+        print("[VALIDATE] ✅ Approved.\n")
+        return True, None
+    print("[VALIDATE] 📝 Feedback received — revising …\n")
+    return False, answer
+
+
+# ── Main node ─────────────────────────────────────────────────────────────────
+
+
 def architect_node(state: AgentState) -> dict:
-    """LangGraph node: run the Architect agent.
+    """LangGraph node: run the full Architect agent flow.
 
     Args:
         state: Current pipeline state containing ``user_request``.
@@ -25,65 +236,144 @@ def architect_node(state: AgentState) -> dict:
         A dict updating ``specs``, ``diagrams``, and ``reasoning_logs``.
     """
     print("\n" + "=" * 60)
-    print("📋 ARCHITECT AGENT — Planning & Master Design")
+    print("🏛️  ARCHITECT AGENT — Full Design Flow")
     print("=" * 60)
 
     llm = get_cortex_llm(model="deepseek-r1", temperature=0.3, max_tokens=4096)
     user_request = state["user_request"]
+    memory = ""
+    reasoning_logs: list[dict] = []
 
-    # ── Plan phase ──────────────────────────────────────────────
-    plan_trace = (
-        f"Analysing user request: '{user_request}'. "
-        "Will produce specs + C4 diagrams."
-    )
-    print(f"\n[PLAN] {plan_trace}")
-
-    # ── Act phase ───────────────────────────────────────────────
-    print("[ACT]  Calling LLM to generate specifications and diagrams …")
-
-    response = llm.invoke(
-        [
-            SystemMessage(content=ARCHITECT_SYSTEM_PROMPT),
-            HumanMessage(content=f"Application to design:\n\n{user_request}"),
-        ]
+    print(f"\n[PLAN] Analysing: '{user_request}'")
+    reasoning_logs.append(
+        {
+            "agent": "architect",
+            "phase": "plan",
+            "content": f"Analysing: '{user_request}'",
+        }
     )
 
-    raw = response.content
+    # ── Step 1: Classify scope ───────────────────────────────────────────────
+    scope, needs_interrogation = _classify_scope(llm, user_request)
+    reasoning_logs.append(
+        {
+            "agent": "architect",
+            "phase": "classify",
+            "content": f"Scope: {scope}, needs_interrogation: {needs_interrogation}",
+        }
+    )
 
-    # ── Parse output ────────────────────────────────────────────
-    specs = ""
-    diagrams = ""
-
-    if "===SPECS_START===" in raw and "===SPECS_END===" in raw:
-        specs = (
-            raw.split("===SPECS_START===")[1]
-            .split("===SPECS_END===")[0]
-            .strip()
+    # ── Step 2: Interrogation ────────────────────────────────────────────────
+    clarifications: list[dict] = []
+    if needs_interrogation:
+        clarifications = _interrogate(
+            llm, user_request, MAX_INTERROGATION_ROUNDS
         )
-    else:
-        specs = raw  # fallback: treat the entire output as specs
-
-    if "===DIAGRAMS_START===" in raw and "===DIAGRAMS_END===" in raw:
-        diagrams = (
-            raw.split("===DIAGRAMS_START===")[1]
-            .split("===DIAGRAMS_END===")[0]
-            .strip()
+        reasoning_logs.append(
+            {
+                "agent": "architect",
+                "phase": "interrogation",
+                "content": f"{len(clarifications)} clarification(s) collected.",
+            }
         )
 
-    # ── Reason phase ────────────────────────────────────────────
-    reason_trace = f"Produced {len(specs)} chars of specs and {len(diagrams)} chars of diagrams."
+    # ── Step 3: Build context + compress if needed ───────────────────────────
+    context = _build_context(user_request, clarifications)
+    memory = _maybe_compress(llm, context, memory)
+    memory_section = (
+        f"## Memory / previous context\n{memory}\n\n" if memory else ""
+    )
+
+    # ── Step 4: Design + self-critique + user validation loop ────────────────
+    specs = diagrams = ""
+    approved = False
+    feedback = ""
+
+    for iteration in range(1, MAX_DESIGN_ITERATIONS + 1):
+        print(f"[ACT]  Design iteration {iteration}/{MAX_DESIGN_ITERATIONS} …")
+
+        if scope in ("function", "feature"):
+            messages = [
+                SystemMessage(
+                    content=DESIGN_LIGHTWEIGHT_PROMPT.format(scope=scope)
+                ),
+                HumanMessage(content=context),
+            ]
+        elif iteration == 1:
+            messages = [
+                SystemMessage(
+                    content=DESIGN_INITIAL_PROMPT.format(
+                        memory_section=memory_section
+                    )
+                ),
+                HumanMessage(content=context),
+            ]
+        else:
+            messages = [
+                SystemMessage(
+                    content=DESIGN_REVISION_PROMPT.format(
+                        memory_section=memory_section, feedback=feedback
+                    )
+                ),
+                HumanMessage(content=context),
+            ]
+
+        d_resp = llm.invoke(messages)
+        thinking, raw = _strip_thinking(d_resp.content)
+        if thinking:
+            print(
+                f"[THINKING — design {iteration}]\n"
+                + thinking[:500]
+                + "\n"
+                + "─" * 60
+            )
+
+        specs, diagrams = _parse_output(raw)
+        reasoning_logs.append(
+            {
+                "agent": "architect",
+                "phase": "act",
+                "content": f"Iteration {iteration}: {len(specs)}c specs, {len(diagrams)}c diagrams.",
+            }
+        )
+
+        # Self-critique
+        critique_issues = _self_critique(llm, specs, diagrams)
+        reasoning_logs.append(
+            {
+                "agent": "architect",
+                "phase": "self_critique",
+                "content": f"Issues: {critique_issues}"
+                if critique_issues
+                else "Passed.",
+            }
+        )
+
+        # Lightweight scope skips user validation
+        if scope in ("function", "feature"):
+            approved = True
+            break
+
+        approved, feedback = _validate_with_user(llm, specs, diagrams)
+        if approved:
+            break
+
+        memory = _maybe_compress(
+            llm, f"Iteration {iteration} feedback: {feedback}", memory
+        )
+        memory_section = f"## Memory / previous context\n{memory}\n\n"
+
+    if not approved:
+        print("[VALIDATE] ⚠️  Max iterations reached — using last design.\n")
+
+    reason_trace = f"Final: {len(specs)}c specs, {len(diagrams)}c diagrams."
     print(f"[REASON] {reason_trace}\n")
+    reasoning_logs.append(
+        {"agent": "architect", "phase": "reason", "content": reason_trace}
+    )
 
     return {
         "specs": specs,
         "diagrams": diagrams,
-        "reasoning_logs": [
-            {"agent": "architect", "phase": "plan", "content": plan_trace},
-            {
-                "agent": "architect",
-                "phase": "act",
-                "content": "Generated specs and C4 diagrams.",
-            },
-            {"agent": "architect", "phase": "reason", "content": reason_trace},
-        ],
+        "reasoning_logs": reasoning_logs,
     }
