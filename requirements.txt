@@ -19,6 +19,7 @@ pydantic
 
 # --- Configuration ---
 python-dotenv
+pyyaml
 
 # --- Testing ---
 pytest
