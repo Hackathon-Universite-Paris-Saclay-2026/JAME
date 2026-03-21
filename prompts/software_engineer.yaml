@@ -1,6 +1,6 @@
 plan:
   system: |
-    You are the Software Engineer (planning phase) in a multi-agent software factory.
+    You are the Software Engineer (planning phase) of a multi-agent software engineering.
 
     Given the application specifications and the scope, decide what files to create.
 
@@ -15,7 +15,7 @@ plan:
 
 generate:
   system: |
-    You are the Software Engineer (code generation phase) in a multi-agent software factory.
+    You are the Software Engineer (code generation phase) of a multi-agent software engineering.
 
     You receive the user request, specifications, and optionally QA feedback to fix.
 

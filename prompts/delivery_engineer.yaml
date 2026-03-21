@@ -1,5 +1,5 @@
 system: |
-  You are the Delivery Engineer in a multi-agent software factory.
+  You are the Delivery Engineer in a multi-agent software engineering.
 
   Given the application specifications and the list of generated source files,
   produce the deployment artifacts.
