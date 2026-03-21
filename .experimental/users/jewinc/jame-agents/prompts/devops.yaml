@@ -341,10 +341,19 @@ act:
     - Use the official lightweight image for that technology
     - Expose the standard port(s) for that service so it is reachable from the host
     - Add a healthcheck using the correct format:
-        test MUST start with "CMD" or "CMD-SHELL" as the first array element, e.g.:
-        `test: ["CMD-SHELL", "<health command>"]`
-    - Persist data with a named volume where relevant
-    - restart: unless-stopped
+        RULE: test MUST start with "CMD" or "CMD-SHELL" as the first array element.
+        Use "CMD" only when every argument is a separate element, e.g.:
+          `test: ["CMD", "redis-cli", "ping"]`
+        Use "CMD-SHELL" when the command contains shell syntax, flags, or pipes, e.g.:
+          `test: ["CMD-SHELL", "pg_isready -U myuser"]`
+          `test: ["CMD-SHELL", "curl -f http://localhost:9000/health || exit 1"]`
+        NEVER put a shell command with flags as a single argument to "CMD".
+        For MinIO specifically use: `test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live || exit 1"]`
+    - For object-storage services (MinIO):
+        - add `command: server /data` so the server actually starts
+        - use `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` (NOT the deprecated MINIO_ACCESS_KEY / MINIO_SECRET_KEY)
+    - ALL services must have a named volume for data persistence (including redis and rabbitmq)
+    - ALL services must have restart: unless-stopped
 
     For the application service:
     - build: .
@@ -362,14 +371,28 @@ act:
 
     ## .env.example requirements
 
-    Generate a `.env.example` with the environment variables the application code needs at runtime.
-    These are the connection strings and config values the app reads — NOT the internal
-    credentials used to configure the infra services themselves (those belong in docker-compose.yml).
-    Derive every variable from the specs and the services in docker-compose.yml.
-    Use safe placeholder values (no real secrets).
+    Generate a `.env.example` with ONLY the variables the application source code reads at runtime.
+    These are connection strings and config values consumed by the app — NOT bootstrap credentials
+    for configuring infra services (those belong in docker-compose.yml environment blocks).
+
+    RULE: every variable must be a URL or config the app passes to a client library.
+    NEVER include raw credentials like POSTGRES_USER, POSTGRES_PASSWORD, MINIO_ACCESS_KEY, etc.
+    Those are docker-compose internals; they must NOT appear in .env.example.
+
+    Variable naming and default values by service type (use real defaults so `cp .env.example .env`
+    is enough to run `docker-compose up` immediately — no manual editing required):
+    - PostgreSQL  → DATABASE_URL=postgresql://postgres:postgres@postgres:5432/app
+    - Redis       → REDIS_URL=redis://redis:6379/0
+    - RabbitMQ    → AMQP_URL=amqp://guest:guest@rabbitmq:5672/
+    - MinIO / S3  → S3_ENDPOINT_URL=http://s3:9000
+                    S3_ACCESS_KEY=minioadmin
+                    S3_SECRET_KEY=minioadmin
+                    S3_BUCKET_NAME=app-bucket
+
+    CRITICAL: the credentials embedded in these URLs must match the values set in the
+    docker-compose.yml environment blocks for the corresponding infra service.
+    Use the docker-compose service name as the hostname in every URL.
     Group variables by service with a comment header, one variable per line.
-    Connection strings must use the docker-compose service name as the hostname, e.g.:
-    `DATABASE_URL=<scheme>://<user>:<pass>@<service-name>:<port>/<db>`
 
     ## .dockerignore requirements
 
