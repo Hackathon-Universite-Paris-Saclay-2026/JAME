@@ -8,6 +8,7 @@ import re
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage
 
+
 COMPRESS_THRESHOLD = 5000
 
 
@@ -95,4 +96,6 @@ def maybe_compress(
         Updated memory string, compressed if necessary.
     """
     full = (memory + "\n\n" + new_context).strip()
-    return compress(llm, full, prompt_template) if len(full) > threshold else full
+    return (
+        compress(llm, full, prompt_template) if len(full) > threshold else full
+    )
