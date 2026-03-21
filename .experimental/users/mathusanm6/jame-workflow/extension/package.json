@@ -1,0 +1,59 @@
+{
+  "name": "jame-workflow-extension",
+  "displayName": "JAME Workflow",
+  "description": "VS Code side-panel interface for the JAME LangGraph orchestrator",
+  "version": "0.0.1",
+  "publisher": "jame",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "jameWorkflow",
+          "title": "JAME Workflow",
+          "icon": "$(sparkle)"
+        }
+      ]
+    },
+    "views": {
+      "jameWorkflow": [
+        {
+          "type": "webview",
+          "id": "jameWorkflow.agent",
+          "name": "Agent",
+          "when": "true"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "jameWorkflow.focus",
+        "title": "JAME Workflow: Focus Agent Panel"
+      }
+    ],
+    "configuration": {
+      "title": "JAME Workflow",
+      "properties": {
+        "jameWorkflow.backendUrl": {
+          "type": "string",
+          "default": "http://localhost:8000",
+          "description": "Base URL for the JAME backend API"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.10",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.7.2"
+  }
+}
