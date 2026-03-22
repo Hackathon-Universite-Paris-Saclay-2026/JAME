@@ -104,8 +104,10 @@ async def _run_graph(
 
     initial_state: AgentState = {
         "user_request": user_request,
+        "scope": "",
         "specs": "",
         "diagrams": "",
+        "functional_design": "",
         "code_files": [],
         "ci_files": [],
         "cd_files": [],

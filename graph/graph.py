@@ -1,6 +1,6 @@
 """LangGraph workflow — orchestrates the multi-agent pipeline.
 
-Flow:
+Flow (all scopes):
   user_request → Architect → Developer → QA ─┐
                                ↑             │
                                └── (FAIL) ───┘

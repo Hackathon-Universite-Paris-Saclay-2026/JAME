@@ -25,6 +25,8 @@ from graph.prompts.developer_prompts import (
     FILE_CONTEXT,
     FUNCTIONAL_DESIGN_SYSTEM_PROMPT,
     GENERATE_SYSTEM_PROMPT,
+    LIGHTWEIGHT_GENERATE_SYSTEM_PROMPT,
+    LIGHTWEIGHT_PLAN_SYSTEM_PROMPT,
     PLAN_SYSTEM_PROMPT,
     ROUTER_HINT,
     SERVICE_HINT,
@@ -505,6 +507,129 @@ def _run_self_validation(
 
 
 # ---------------------------------------------------------------------------
+# Lightweight path (function / feature scope)
+# ---------------------------------------------------------------------------
+
+LIGHTWEIGHT_SCOPES = ("function", "feature")
+
+
+def _run_lightweight(llm: BaseChatModel, scope: str, specs: str) -> list[dict]:
+    """Generate code for a function- or feature-level request.
+
+    Skips the full-stack pipeline entirely — no backend/frontend scaffolding,
+    no database, no routers/services.  Produces only the minimal files the
+    user actually needs (e.g. ``fibonacci.py`` + ``test_fibonacci.py``).
+
+    Args:
+        llm: LangChain LLM instance.
+        scope: Either ``"function"`` or ``"feature"``.
+        specs: Focused specification from the Architect.
+
+    Returns:
+        List of generated CodeFile dicts.
+    """
+    print(f"\n[PLAN] Lightweight scope ({scope}) — minimal file set")
+
+    # Step 1: ask LLM for a minimal file plan
+    plan_prompt = LIGHTWEIGHT_PLAN_SYSTEM_PROMPT.format(scope=scope)
+    file_plan: list[str] = []
+    try:
+        plan_llm = llm.with_structured_output(FilePlan)
+        result: FilePlan = plan_llm.invoke(
+            [
+                SystemMessage(content=plan_prompt),
+                HumanMessage(content=f"## Specifications\n{specs}"),
+            ]
+        )
+        file_plan = [_sanitize_path(f) for f in result.files]
+    except Exception as e:
+        _log(
+            "medium",
+            "PLAN",
+            f"Structured plan failed ({type(e).__name__}), using fallback.",
+        )
+
+    # Fallback: one source file + one test file
+    if not file_plan:
+        file_plan = ["solution.py", "test_solution.py"]
+
+    print(f"[PLAN] Files: {file_plan}")
+
+    # Step 2: generate each file
+    gen_prompt = LIGHTWEIGHT_GENERATE_SYSTEM_PROMPT.format(scope=scope)
+    code_files: list[dict] = []
+    generated: dict[str, dict] = {}
+
+    for i, file_path in enumerate(file_plan, 1):
+        file_path = _sanitize_path(file_path)
+        language = _detect_language(file_path)
+        print(f"\n[ACT]  Generating file {i}/{len(file_plan)}: {file_path} …")
+
+        # Build cross-reference from already-generated files (for test files)
+        dep_section = ""
+        if generated:
+            dep_parts = []
+            for dep_path, dep_file in generated.items():
+                content = dep_file.get("content", "")
+                if content:
+                    dep_parts.append(f"### {dep_path}\n```\n{content}\n```")
+            if dep_parts:
+                dep_section = (
+                    "\n## Already-generated files (use EXACT interfaces)\n"
+                    + "\n\n".join(dep_parts)
+                )
+
+        user_msg = (
+            f"## Specifications\n{specs}\n\n"
+            f"## File to generate\nPath: `{file_path}`"
+            f"{dep_section}"
+        )
+
+        content = ""
+        try:
+            content_llm = llm.with_structured_output(SingleFileContent)
+            result_file = content_llm.invoke(
+                [
+                    SystemMessage(content=gen_prompt),
+                    HumanMessage(content=user_msg),
+                ]
+            )
+            content = result_file.content
+        except Exception:
+            try:
+                response = llm.invoke(
+                    [
+                        SystemMessage(content=gen_prompt),
+                        HumanMessage(content=user_msg),
+                    ]
+                )
+                content = response.content
+            except Exception as e2:
+                _log(
+                    "high",
+                    "ACT",
+                    f"Generation failed ({type(e2).__name__}), skipping",
+                )
+                continue
+
+        content = _strip_markdown_fences(content)
+
+        if content.strip():
+            file_dict = {
+                "path": file_path,
+                "content": content,
+                "language": language,
+            }
+            code_files.append(file_dict)
+            generated[file_path] = file_dict
+            print(f"[ACT]    ✓ {len(content)} chars")
+        else:
+            _log("high", "ACT", f"Empty content for {file_path}, skipping")
+
+    return code_files
+
+
+# ---------------------------------------------------------------------------
 # Main node
 # ---------------------------------------------------------------------------
 
@@ -536,9 +661,40 @@ def developer_node(state: AgentState) -> dict:
     llm = get_cortex_llm(model="deepseek-r1", temperature=0.2, max_tokens=8000)
 
     specs = state.get("specs", "")
+    scope = state.get("scope", "system")
     qa_feedback = state.get("qa_feedback", "")
     qa_issues = state.get("qa_issues", [])
     iteration = state.get("iteration", 0)
+
+    # ── Lightweight path: function / feature scope ───────────────────────────
+
+    if scope in LIGHTWEIGHT_SCOPES and iteration == 0:
+        print(f"\n⚡ Lightweight mode ({scope}) — skipping full-stack pipeline")
+        code_files = _run_lightweight(llm, scope, specs)
+        file_list = (
+            ", ".join(f["path"] for f in code_files) if code_files else "(none)"
+        )
+        reason = f"Lightweight ({scope}): generated {len(code_files)} file(s): {file_list}"
+        print(f"\n[REASON] {reason}\n")
+        return {
+            "functional_design": "",
+            "code_files": code_files,
+            "reasoning_logs": [
+                {
+                    "agent": "developer",
+                    "phase": "plan",
+                    "content": f"Lightweight scope ({scope}) — minimal file set.",
+                },
+                {
+                    "agent": "developer",
+                    "phase": "act",
+                    "content": f"Generated {len(code_files)} file(s).",
+                },
+                {"agent": "developer", "phase": "reason", "content": reason},
+            ],
+        }
+
+    # ── Full-stack path: system / product scope ──────────────────────────────
 
     # ── Phase 1: Functional Design ───────────────────────────────────────────
 
