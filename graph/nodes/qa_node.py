@@ -29,7 +29,6 @@ import json
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage
 
-from graph.nodes.utils import maybe_compress, parse_json_safe, strip_thinking
 from graph.prompts.qa_prompts import (
     COMPRESS_PROMPT,
     CROSS_FILE_PROMPT,
@@ -42,6 +41,7 @@ from graph.prompts.qa_prompts import (
 )
 from graph.state import AgentState, CodeFile, QAIssue
 from integrations.cortex import get_cortex_llm
+from utils.node import maybe_compress, parse_json_safe, strip_thinking
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -82,7 +82,13 @@ def _triage(
     print("[TRIAGE] Classifying files by risk priority …")
     file_list = "\n".join(f"- {f.path}" for f in code_files)
     resp = llm.invoke(
-        [HumanMessage(content=TRIAGE_PROMPT.format(specs=specs[:2000], file_list=file_list))]
+        [
+            HumanMessage(
+                content=TRIAGE_PROMPT.format(
+                    specs=specs[:2000], file_list=file_list
+                )
+            )
+        ]
     )
     thinking, raw = strip_thinking(resp.content)
     if thinking:
@@ -110,24 +116,32 @@ def _analyse_file(
     """AI-DLC Static Review — single file analysis."""
     print(f"[REVIEW] {code_file.path} [{priority}] …")
     resp = llm.invoke(
-        [HumanMessage(content=STATIC_ANALYSIS_PROMPT.format(
-            priority=priority,
-            specs=specs[:2000],
-            file_path=code_file.path,
-            language=code_file.language,
-            content=code_file.content,
-        ))]
+        [
+            HumanMessage(
+                content=STATIC_ANALYSIS_PROMPT.format(
+                    priority=priority,
+                    specs=specs[:2000],
+                    file_path=code_file.path,
+                    language=code_file.language,
+                    content=code_file.content,
+                )
+            )
+        ]
     )
     thinking, raw = strip_thinking(resp.content)
     if thinking:
         print(f"[THINKING — review {code_file.path}]\n{thinking}\n{'─' * 60}")
 
-    result = parse_json_safe(raw, {"file": code_file.path, "issues": [], "has_issues": False})
+    result = parse_json_safe(
+        raw, {"file": code_file.path, "issues": [], "has_issues": False}
+    )
     issues = result.get("issues", [])
     if issues:
         c = sum(1 for i in issues if i.get("severity") == "critical")
         m = sum(1 for i in issues if i.get("severity") == "major")
-        print(f"    ⚠️  {len(issues)} issue(s): {c} critical / {m} major / {len(issues) - c - m} minor")
+        print(
+            f"    ⚠️  {len(issues)} issue(s): {c} critical / {m} major / {len(issues) - c - m} minor"
+        )
     else:
         print("    ✅ No issues.")
     return result
@@ -140,14 +154,21 @@ def _cross_file_check(
     print("[CROSS] Running cross-file consistency check …")
     summaries = [
         f"- {r['file']}: "
-        + ("; ".join(i.get("description", "") for i in r.get("issues", [])) or "no issues")
+        + (
+            "; ".join(i.get("description", "") for i in r.get("issues", []))
+            or "no issues"
+        )
         for r in per_file_results
     ]
     resp = llm.invoke(
-        [HumanMessage(content=CROSS_FILE_PROMPT.format(
-            specs=specs[:2000],
-            per_file_summaries="\n".join(summaries),
-        ))]
+        [
+            HumanMessage(
+                content=CROSS_FILE_PROMPT.format(
+                    specs=specs[:2000],
+                    per_file_summaries="\n".join(summaries),
+                )
+            )
+        ]
     )
     thinking, raw = strip_thinking(resp.content)
     if thinking:
@@ -170,18 +191,26 @@ def _generate_fix_instructions(
     critical_count = sum(1 for i in issues if i.get("severity") == "critical")
 
     if critical_count >= 3:
-        print(f"[FIX] {code_file.path}: {critical_count} critical issues — escalating to rewrite brief.")
+        print(
+            f"[FIX] {code_file.path}: {critical_count} critical issues — escalating to rewrite brief."
+        )
         issues_text = "\n".join(
             f"- [{i.get('severity', '?')}] {i.get('description', '')} "
             f"(rule: {i.get('security_rule') or 'n/a'}) → {i.get('fix', '')}"
             for i in issues
         )
-        resp = llm.invoke([HumanMessage(content=FULL_REWRITE_PROMPT.format(
-            file_path=code_file.path,
-            critical_count=critical_count,
-            issues=issues_text,
-            specs=specs[:2000],
-        ))])
+        resp = llm.invoke(
+            [
+                HumanMessage(
+                    content=FULL_REWRITE_PROMPT.format(
+                        file_path=code_file.path,
+                        critical_count=critical_count,
+                        issues=issues_text,
+                        specs=specs[:2000],
+                    )
+                )
+            ]
+        )
     else:
         print(f"[FIX] {code_file.path}: generating patch instructions …")
         issues_text = "\n".join(
@@ -190,12 +219,18 @@ def _generate_fix_instructions(
             f"(rule: {i.get('security_rule') or 'n/a'}) → {i.get('fix', '')}"
             for i in issues
         )
-        resp = llm.invoke([HumanMessage(content=PATCH_INSTRUCTIONS_PROMPT.format(
-            file_path=code_file.path,
-            issues=issues_text,
-            language=code_file.language,
-            content=code_file.content,
-        ))])
+        resp = llm.invoke(
+            [
+                HumanMessage(
+                    content=PATCH_INSTRUCTIONS_PROMPT.format(
+                        file_path=code_file.path,
+                        issues=issues_text,
+                        language=code_file.language,
+                        content=code_file.content,
+                    )
+                )
+            ]
+        )
 
     _, instructions = strip_thinking(resp.content)
     return instructions
@@ -210,17 +245,33 @@ def _re_review_file(
         f"- [{i.get('severity', '?')}] {i.get('description', '')}"
         for i in original_issues
     )
-    resp = llm.invoke([HumanMessage(content=RE_REVIEW_PROMPT.format(
-        original_issues=original_text,
-        file_path=code_file.path,
-        language=code_file.language,
-        content=code_file.content,
-    ))])
+    resp = llm.invoke(
+        [
+            HumanMessage(
+                content=RE_REVIEW_PROMPT.format(
+                    original_issues=original_text,
+                    file_path=code_file.path,
+                    language=code_file.language,
+                    content=code_file.content,
+                )
+            )
+        ]
+    )
     thinking, raw = strip_thinking(resp.content)
     if thinking:
-        print(f"[THINKING — re-review {code_file.path}]\n{thinking}\n{'─' * 60}")
+        print(
+            f"[THINKING — re-review {code_file.path}]\n{thinking}\n{'─' * 60}"
+        )
 
-    result = parse_json_safe(raw, {"file": code_file.path, "resolved": [], "new_issues": [], "passed": False})
+    result = parse_json_safe(
+        raw,
+        {
+            "file": code_file.path,
+            "resolved": [],
+            "new_issues": [],
+            "passed": False,
+        },
+    )
     print(f"    {'✅ PASS' if result.get('passed') else '❌ FAIL'}")
     return result
 
@@ -231,12 +282,18 @@ def _issue_verdict(
     """AI-DLC Verdict — issue final QA PASS / FAIL."""
     file_count = len(re_review_results)
     passed_count = sum(1 for r in re_review_results if r.get("passed"))
-    resp = llm.invoke([HumanMessage(content=VERDICT_PROMPT.format(
-        re_review_results=json.dumps(re_review_results, indent=2),
-        file_count=file_count,
-        passed_count=passed_count,
-        failed_count=file_count - passed_count,
-    ))])
+    resp = llm.invoke(
+        [
+            HumanMessage(
+                content=VERDICT_PROMPT.format(
+                    re_review_results=json.dumps(re_review_results, indent=2),
+                    file_count=file_count,
+                    passed_count=passed_count,
+                    failed_count=file_count - passed_count,
+                )
+            )
+        ]
+    )
     _, verdict_text = strip_thinking(resp.content)
     return "AI-DLC QA decision: PASS" in verdict_text, verdict_text
 
@@ -247,17 +304,21 @@ def _collect_qa_issues(
     issues: list[QAIssue] = []
     for r in per_file_results:
         for raw in r.get("issues", []):
-            issues.append(QAIssue(
-                file=r.get("file", "UNKNOWN"),
+            issues.append(
+                QAIssue(
+                    file=r.get("file", "UNKNOWN"),
+                    severity=raw.get("severity", "minor"),
+                    description=raw.get("description", ""),
+                )
+            )
+    for raw in cross_file_result.get("issues", []):
+        issues.append(
+            QAIssue(
+                file=raw.get("file", "GENERAL"),
                 severity=raw.get("severity", "minor"),
                 description=raw.get("description", ""),
-            ))
-    for raw in cross_file_result.get("issues", []):
-        issues.append(QAIssue(
-            file=raw.get("file", "GENERAL"),
-            severity=raw.get("severity", "minor"),
-            description=raw.get("description", ""),
-        ))
+            )
+        )
     return issues
 
 
@@ -298,17 +359,37 @@ def qa_node(state: AgentState) -> dict:
             "qa_feedback": "No code files provided to the Quality Engineer.",
             "qa_issues": [],
             "iteration": iteration + 1,
-            "reasoning_logs": [{"agent": "qa", "phase": "plan", "content": "No code files to review."}],
+            "reasoning_logs": [
+                {
+                    "agent": "qa",
+                    "phase": "plan",
+                    "content": "No code files to review.",
+                }
+            ],
         }
 
     llm = get_cortex_llm(model="deepseek-r1", temperature=0.3, max_tokens=4096)
 
-    print(f"\n[AI-DLC] Build and Test — iteration {iteration + 1}/{max_iterations} — {len(code_files)} file(s)")
-    reasoning_logs.append({"agent": "qa", "phase": "plan", "content": f"Iteration {iteration + 1}/{max_iterations}, {len(code_files)} file(s)."})
+    print(
+        f"\n[AI-DLC] Build and Test — iteration {iteration + 1}/{max_iterations} — {len(code_files)} file(s)"
+    )
+    reasoning_logs.append(
+        {
+            "agent": "qa",
+            "phase": "plan",
+            "content": f"Iteration {iteration + 1}/{max_iterations}, {len(code_files)} file(s).",
+        }
+    )
 
     # ── [TRIAGE] ─────────────────────────────────────────────────────────────
     priority_map = _triage(llm, specs, code_files)
-    reasoning_logs.append({"agent": "qa", "phase": "act", "content": f"Triage complete: {priority_map}"})
+    reasoning_logs.append(
+        {
+            "agent": "qa",
+            "phase": "act",
+            "content": f"Triage complete: {priority_map}",
+        }
+    )
 
     # ── [REVIEW] Critical files first ────────────────────────────────────────
     ordered_files = sorted(
@@ -319,7 +400,9 @@ def qa_node(state: AgentState) -> dict:
     )
     per_file_results: list[dict] = []
     for code_file in ordered_files:
-        result = _analyse_file(llm, specs, code_file, priority_map.get(code_file.path, "standard"))
+        result = _analyse_file(
+            llm, specs, code_file, priority_map.get(code_file.path, "standard")
+        )
         per_file_results.append(result)
         memory = maybe_compress(
             llm,
@@ -328,18 +411,32 @@ def qa_node(state: AgentState) -> dict:
             COMPRESS_PROMPT,
         )
 
-    reasoning_logs.append({"agent": "qa", "phase": "act", "content": f"{len(per_file_results)} file(s) analysed."})
+    reasoning_logs.append(
+        {
+            "agent": "qa",
+            "phase": "act",
+            "content": f"{len(per_file_results)} file(s) analysed.",
+        }
+    )
 
     # ── [CROSS] ──────────────────────────────────────────────────────────────
     cross_file_result = _cross_file_check(llm, specs, per_file_results)
-    reasoning_logs.append({"agent": "qa", "phase": "act", "content": f"{len(cross_file_result.get('issues', []))} cross-file issue(s)."})
+    reasoning_logs.append(
+        {
+            "agent": "qa",
+            "phase": "act",
+            "content": f"{len(cross_file_result.get('issues', []))} cross-file issue(s).",
+        }
+    )
 
     all_qa_issues = _collect_qa_issues(per_file_results, cross_file_result)
     critical_total = sum(1 for i in all_qa_issues if i.severity == "critical")
     major_total = sum(1 for i in all_qa_issues if i.severity == "major")
     minor_total = len(all_qa_issues) - critical_total - major_total
 
-    print(f"[AI-DLC] Total issues: {len(all_qa_issues)} ({critical_total} critical / {major_total} major / {minor_total} minor)")
+    print(
+        f"[AI-DLC] Total issues: {len(all_qa_issues)} ({critical_total} critical / {major_total} major / {minor_total} minor)"
+    )
 
     # ── Early exit: only minor issues → immediate PASS ───────────────────────
     if critical_total == 0 and major_total == 0:
@@ -352,7 +449,13 @@ def qa_node(state: AgentState) -> dict:
             ],
             next_stage="Pipeline complete",
         )
-        reasoning_logs.append({"agent": "qa", "phase": "reason", "content": "No critical/major issues. AI-DLC QA decision: PASS."})
+        reasoning_logs.append(
+            {
+                "agent": "qa",
+                "phase": "reason",
+                "content": "No critical/major issues. AI-DLC QA decision: PASS.",
+            }
+        )
         return {
             "qa_passed": True,
             "qa_feedback": "",
@@ -367,12 +470,21 @@ def qa_node(state: AgentState) -> dict:
         file_issues = result.get("issues", [])
         if not file_issues:
             continue
-        code_file = next((f for f in code_files if f.path == result["file"]), None)
+        code_file = next(
+            (f for f in code_files if f.path == result["file"]), None
+        )
         if code_file is None:
             continue
-        instructions = _generate_fix_instructions(llm, specs, code_file, file_issues)
+        instructions = _generate_fix_instructions(
+            llm, specs, code_file, file_issues
+        )
         fix_feedback_parts.append(f"### {code_file.path}\n{instructions}")
-        memory = maybe_compress(llm, f"Fix instructions for {code_file.path}.", memory, COMPRESS_PROMPT)
+        memory = maybe_compress(
+            llm,
+            f"Fix instructions for {code_file.path}.",
+            memory,
+            COMPRESS_PROMPT,
+        )
 
     cross_issues = cross_file_result.get("issues", [])
     if cross_issues:
@@ -383,12 +495,26 @@ def qa_node(state: AgentState) -> dict:
         fix_feedback_parts.append(f"### Cross-file issues\n{cross_text}")
 
     qa_feedback = "\n\n".join(fix_feedback_parts)
-    reasoning_logs.append({"agent": "qa", "phase": "act", "content": f"Fix instructions produced for {len(fix_feedback_parts)} target(s)."})
+    reasoning_logs.append(
+        {
+            "agent": "qa",
+            "phase": "act",
+            "content": f"Fix instructions produced for {len(fix_feedback_parts)} target(s).",
+        }
+    )
 
     # ── Return to Developer if iterations remain ──────────────────────────────
     if iteration + 1 < max_iterations:
-        print(f"[AI-DLC] Fix instructions dispatched to Developer (iteration {iteration + 1}/{max_iterations}).\n")
-        reasoning_logs.append({"agent": "qa", "phase": "reason", "content": f"AI-DLC QA decision: FAIL at iteration {iteration + 1}. Feedback dispatched."})
+        print(
+            f"[AI-DLC] Fix instructions dispatched to Developer (iteration {iteration + 1}/{max_iterations}).\n"
+        )
+        reasoning_logs.append(
+            {
+                "agent": "qa",
+                "phase": "reason",
+                "content": f"AI-DLC QA decision: FAIL at iteration {iteration + 1}. Feedback dispatched.",
+            }
+        )
         return {
             "qa_passed": False,
             "qa_feedback": qa_feedback,
@@ -398,17 +524,30 @@ def qa_node(state: AgentState) -> dict:
         }
 
     # ── [RE-REVIEW] Final iteration ───────────────────────────────────────────
-    print("[AI-DLC] Max iterations reached — re-reviewing and issuing verdict.\n")
+    print(
+        "[AI-DLC] Max iterations reached — re-reviewing and issuing verdict.\n"
+    )
     re_review_results: list[dict] = []
     for result in per_file_results:
         original_issues = result.get("issues", [])
         if not original_issues:
-            re_review_results.append({"file": result["file"], "resolved": [], "new_issues": [], "passed": True})
+            re_review_results.append(
+                {
+                    "file": result["file"],
+                    "resolved": [],
+                    "new_issues": [],
+                    "passed": True,
+                }
+            )
             continue
-        code_file = next((f for f in code_files if f.path == result["file"]), None)
+        code_file = next(
+            (f for f in code_files if f.path == result["file"]), None
+        )
         if code_file is None:
             continue
-        re_review_results.append(_re_review_file(llm, code_file, original_issues))
+        re_review_results.append(
+            _re_review_file(llm, code_file, original_issues)
+        )
 
     # ── [VERDICT] ─────────────────────────────────────────────────────────────
     passed, verdict_text = _issue_verdict(llm, re_review_results)
@@ -416,7 +555,13 @@ def qa_node(state: AgentState) -> dict:
     print(verdict_text)
     print("=" * 60 + "\n")
 
-    reasoning_logs.append({"agent": "qa", "phase": "reason", "content": f"AI-DLC QA decision: {'PASS' if passed else 'FAIL'} after {iteration + 1} iteration(s)."})
+    reasoning_logs.append(
+        {
+            "agent": "qa",
+            "phase": "reason",
+            "content": f"AI-DLC QA decision: {'PASS' if passed else 'FAIL'} after {iteration + 1} iteration(s).",
+        }
+    )
     return {
         "qa_passed": passed,
         "qa_feedback": "" if passed else qa_feedback,
