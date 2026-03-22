@@ -34,8 +34,8 @@ def save_artifacts(state: dict, output_dir: Path | str = "output") -> Path:
     """
     output_path = Path(output_dir)
     project_dir = output_path / "project"
-    output_path.mkdir(exist_ok=True)
-    project_dir.mkdir(exist_ok=True)
+    output_path.mkdir(parents=True, exist_ok=True)
+    project_dir.mkdir(parents=True, exist_ok=True)
 
     print("\n" + "=" * 60)
     print("💾 SAVING ARTIFACTS")
