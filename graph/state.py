@@ -14,12 +14,13 @@ from typing import Annotated, TypedDict
 from pydantic import BaseModel, Field, field_validator
 
 
-class ReasoningEntry(TypedDict):
+class ReasoningEntry(TypedDict, total=False):
     """A single entry in the agent reasoning trace."""
 
     agent: str
     phase: str  # "plan" | "act" | "reason"
     content: str
+    thinking: str  # optional LLM reasoning block (shown collapsible in VS Code UI)
 
 
 def _sanitize_path(path: str) -> str:
