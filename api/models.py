@@ -10,6 +10,8 @@ from pydantic import BaseModel, Field
 
 
 class RunStatus(str, Enum):
+    """Lifecycle states for a pipeline run."""
+
     PENDING = "pending"
     RUNNING = "running"
     SUCCEEDED = "succeeded"
