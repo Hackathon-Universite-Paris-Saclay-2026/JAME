@@ -131,6 +131,41 @@ _EXT_TO_LANG = {
     ".css": "css",
 }
 
+_FILE_MAX_TOKENS: dict[str, int] = {
+    # Config / manifest — plain lists, no logic
+    "backend/requirements.txt": 512,
+    "frontend/package.json": 512,
+    # App bootstrap — wires routers, no business logic
+    "backend/main.py": 2048,
+    # Test bootstrap — fixtures and shared helpers only
+    "tests/conftest.py": 2048,
+    # Structural foundation — can grow with many models/relations
+    "backend/database.py": 4000,
+    "backend/models.py": 4000,
+}
+
+# Path-prefix fallbacks when no exact match is found.
+_PREFIX_MAX_TOKENS: list[tuple[str, int]] = [
+    ("backend/routers/", 6000),
+    ("backend/services/", 7000),  # business logic — can be heavy
+    ("frontend/src/components/", 5000),
+    ("frontend/src/", 5000),
+    ("tests/", 8000),  # test suites need thorough coverage
+]
+
+_DEFAULT_MAX_TOKENS = 6000
+
+
+def _get_max_tokens(file_path: str) -> int:
+    """Return the token budget for a given source file."""
+    if file_path in _FILE_MAX_TOKENS:
+        return _FILE_MAX_TOKENS[file_path]
+    for prefix, tokens in _PREFIX_MAX_TOKENS:
+        if file_path.startswith(prefix):
+            return tokens
+    return _DEFAULT_MAX_TOKENS
+
+
 _SEVERITY_LABELS = {
     "critical": "CRITICAL",
     "high": "HIGH",
@@ -342,7 +377,7 @@ def _generate_file(
         file_path, specs, functional_design, generated, file_issues
     )
     content = _invoke_llm(
-        llm,
+        llm.bind(max_tokens=_get_max_tokens(file_path)),
         GENERATE_SYSTEM_PROMPT,
         user_msg,
         schema=SingleFileContent,
