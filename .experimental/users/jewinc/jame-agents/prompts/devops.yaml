@@ -2,7 +2,6 @@
 # Organized by phase. Update action SHAs here when bumping versions.
 
 # ─── PINNED GITHUB ACTIONS SHAs ───────────────────────────────────────────────
-# Verified 2025 — update when bumping action versions
 
 actions:
   checkout:     "actions/checkout@v4"
@@ -39,373 +38,140 @@ decision:
     needs_cd=true  -> project exposes a persistent network service (API, web server, worker, daemon)
     needs_cd=false -> pure function, library, script, or CLI tool with no server
 
-# ─── ACT PHASE ────────────────────────────────────────────────────────────────
-
-act:
-
-  # Shared CI + tooling spec — appended to both ci_only and full prompts by devops.py.
-  # Contains {checkout}, {setup_python}, {cache} placeholders for .format() injection.
-  shared: |
-
-    ## CI Workflow requirements (mandatory)
-
-    The workflow MUST have two parallel jobs: `lint` and `test`.
-
-    ### Triggers (both jobs)
-    - push to main
-    - pull_request to main
-
-    ### Concurrency (cancel duplicate runs on the same branch)
-    ```yaml
-    concurrency:
-      group: ci-${{{{ github.ref }}}}
-      cancel-in-progress: true
-    ```
-
-    ### Job: lint
-    - runs-on: ubuntu-latest
-    - Steps:
-      1. uses: {checkout}
-      2. uses: {setup_python}  with python-version: "3.12"
-      3. uses: {cache}  with path ~/.cache/pip, key ${{{{ runner.os }}}}-pip-${{{{ hashFiles('**/requirements*.txt') }}}}
-      4. run: pip install -r requirements.txt
-      5. run: pip install -r requirements-dev.txt
-      6. run: ruff check .
-      7. run: ruff format --check .
-
-    ### Job: test
-    - runs-on: ubuntu-latest
-    - Matrix python-version: ["3.11", "3.12"]
-    - Steps:
-      1. uses: {checkout}
-      2. uses: {setup_python}  with python-version: ${{{{ matrix.python-version }}}}
-      3. uses: {cache}  with path ~/.cache/pip, key ${{{{ runner.os }}}}-pip-${{{{ hashFiles('**/requirements*.txt') }}}}
-      4. run: pip install -r requirements.txt
-      5. run: pip install -r requirements-dev.txt
-      6. run: pytest --tb=short
-      7. run: pip-audit
-
-    ### Rules
-    - The workflow must be valid YAML that runs on GitHub Actions without modification
-
-    ## requirements.txt requirements
-
-    List every runtime dependency the application needs to run (no dev tools).
-    Derive them from the application specifications — databases, caches, queues, HTTP clients, etc.
-    Pin each with >= to the minimum compatible version.
-
-    Examples of dependencies to infer:
-    - PostgreSQL access  → psycopg2-binary>=2.9
-    - Redis access       → redis>=5.0
-    - RabbitMQ / AMQP   → aio-pika>=9.0
-    - HTTP API (FastAPI) → fastapi>=0.110, uvicorn>=0.29
-    - HTTP client        → httpx>=0.27 or requests>=2.31
-    - AWS S3             → boto3>=1.34
-
-    Only emit `# No runtime dependencies` for trivial projects with no I/O
-    (e.g. a pure utility function with no external services).
-
-    ## requirements-dev.txt requirements
-
-    List only dev/test dependencies (do NOT include `-r requirements.txt`).
-    Pin each with >=:
-    ```
-    pytest>=8
-    ruff>=0.9
-    pip-audit>=2.8
-    ```
-
-    ## pyproject.toml requirements
-
-    Emit a full `pyproject.toml` with [project] metadata and a [tool.ruff] section.
-    Follow this structure exactly:
-
-    ```toml
-    [project]
-    name = "<project-name-derived-from-specs>"
-    version = "0.1.0"
-    requires-python = ">=3.11"
-
-    [tool.ruff]
-    line-length = 80
-    target-version = "py311"
-    exclude = [".git", ".github", ".venv", "venv", "__pycache__", "build", "dist"]
-
-    [tool.ruff.lint]
-    select = ["E", "W", "F", "I", "N", "D", "UP", "B", "C4", "SIM", "ANN", "S", "PTH", "RET", "ARG", "Q", "RUF", "TRY"]
-    ignore = ["D203", "D213", "E501", "ANN401", "D107", "COM812", "ISC001", "TRY003"]
-    fixable = ["ALL"]
-
-    [tool.ruff.lint.per-file-ignores]
-    "__init__.py" = ["F401", "D104"]
-    "test_*.py" = ["D", "ANN", "S101"]
-    "**/tests/**/*.py" = ["D", "ANN", "S101"]
-
-    [tool.ruff.lint.pydocstyle]
-    convention = "google"
-
-    [tool.ruff.lint.isort]
-    force-sort-within-sections = true
-    lines-after-imports = 2
-
-    [tool.ruff.format]
-    quote-style = "double"
-    indent-style = "space"
-    line-ending = "auto"
-    ```
-
-    ## .gitignore requirements
-
-    Emit this file verbatim:
-    ```
-    # Python
-    __pycache__/
-    *.py[cod]
-    *.pyo
-    *.pyd
-    *.egg-info/
-    dist/
-    build/
-    .eggs/
-
-    # Virtual environments
-    venv/
-    .venv/
-    env/
-
-    # Environment & secrets
-    .env
-    .env.*
-    !.env.example
-
-    # Tools
-    .mypy_cache/
-    .ruff_cache/
-    .pytest_cache/
-    .coverage
-    htmlcov/
-
-    # IDE
-    .idea/
-    .vscode/
-    ```
-
-    ## Makefile requirements
-
-    - CRITICAL: recipe lines MUST start with a real TAB character (\t), never spaces
-    - Do NOT add an `activate-venv` target: `source` runs in a subshell and cannot
-      affect the calling shell — it is a no-op in Make. Instead, prefix every recipe
-      that needs the venv with `@source venv/bin/activate &&`.
-    - Declare all targets in a single .PHONY line at the top
-    - Each recipe must print a short @echo description of what it does
-    - Use `@source venv/bin/activate &&` prefix to run commands inside the venv
-    - Targets (in this order):
-        help                      → print available targets and their description
-        create-venv               → python3 -m venv venv && pip install --upgrade pip
-        install                   → pip install -r requirements.txt  (inside venv)
-        install-dev               → pip install -r requirements-dev.txt  (inside venv)
-        format                    → ruff format .  (inside venv)
-        lint-with-auto-fix        → ruff check . --fix  (inside venv)
-        lint-with-auto-unsafe-fix → ruff check . --fix --unsafe-fixes  (inside venv)
-        test                      → pytest --tb=short  (inside venv)
-        check                     → $(MAKE) lint-with-auto-fix && $(MAKE) test
-
-  ci_only: |
-    You are the DevOps Agent of a multi-agent software factory.
-
-    Generate a GitHub Actions CI workflow and local developer tooling for this project.
-    Return your output in EXACTLY this format and order (no other text):
-
-    ===CICD_START===
-    ```yaml
-    <GitHub Actions workflow YAML>
-    ```
-    ===CICD_END===
-
-    ===REQUIREMENTS_START===
-    <requirements.txt content — plain text, no code fence>
-    ===REQUIREMENTS_END===
-
-    ===REQUIREMENTS_DEV_START===
-    <requirements-dev.txt content — plain text, no code fence>
-    ===REQUIREMENTS_DEV_END===
-
-    ===PYPROJECT_START===
-    <pyproject.toml content — plain text, no code fence>
-    ===PYPROJECT_END===
-
-    ===MAKEFILE_START===
-    <Makefile content — plain text, no code fence>
-    ===MAKEFILE_END===
-
-    ===GITIGNORE_START===
-    <.gitignore content — plain text, no code fence>
-    ===GITIGNORE_END===
-
-  full: |
-    You are the DevOps Agent of a multi-agent software factory.
-
-    Generate all CI/CD artifacts and local developer tooling for this project.
-    Return your output in EXACTLY this format and order (no other text):
-
-    ===CICD_START===
-    ```yaml
-    <GitHub Actions workflow YAML>
-    ```
-    ===CICD_END===
-
-    ===DOCKERFILE_START===
-    ```dockerfile
-    <Dockerfile content>
-    ```
-    ===DOCKERFILE_END===
-
-    ===COMPOSE_START===
-    ```yaml
-    <docker-compose.yml content>
-    ```
-    ===COMPOSE_END===
-
-    ===DOCKERIGNORE_START===
-    <.dockerignore content — plain text, no code fence>
-    ===DOCKERIGNORE_END===
-
-    ===REQUIREMENTS_START===
-    <requirements.txt content — plain text, no code fence>
-    ===REQUIREMENTS_END===
-
-    ===REQUIREMENTS_DEV_START===
-    <requirements-dev.txt content — plain text, no code fence>
-    ===REQUIREMENTS_DEV_END===
-
-    ===PYPROJECT_START===
-    <pyproject.toml content — plain text, no code fence>
-    ===PYPROJECT_END===
-
-    ===MAKEFILE_START===
-    <Makefile content — plain text, no code fence>
-    ===MAKEFILE_END===
-
-    ===GITIGNORE_START===
-    <.gitignore content — plain text, no code fence>
-    ===GITIGNORE_END===
-
-    ===ENV_EXAMPLE_START===
-    <.env.example content — plain text, no code fence>
-    ===ENV_EXAMPLE_END===
-
-    ## Dockerfile requirements (mandatory)
-
-    Use this EXACT multi-stage pattern — do NOT deviate:
-
-    ```dockerfile
-    # ── Stage 1: builder ──────────────────────────────────────────
-    FROM python:3.12-slim AS builder
-    WORKDIR /app
-    RUN python -m venv /venv
-    COPY requirements.txt .
-    RUN /venv/bin/pip install --no-cache-dir -r requirements.txt
-
-    # ── Stage 2: final ────────────────────────────────────────────
-    FROM python:3.12-slim
-    WORKDIR /app
-    # Install curl for the HEALTHCHECK before switching user
-    RUN apt-get update && apt-get install -y --no-install-recommends curl \
-        && rm -rf /var/lib/apt/lists/*
-    # Copy the venv (contains all installed packages) from builder
-    COPY --from=builder /venv /venv
-    ENV PATH="/venv/bin:$PATH"
-    # Copy source code
-    COPY . .
-    # Create non-root user and take ownership AFTER copying files
-    RUN useradd -ms /bin/bash appuser && chown -R appuser /app
-    USER appuser
-    EXPOSE <port>
-    HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-        CMD curl --fail http://localhost:<port>/health || exit 1
-    CMD [...]
-    ```
-
-    Rules:
-    - Replace `<port>` with the port derived from the specs
-    - Replace `CMD [...]` with the correct entrypoint for the application
-    - Never run as root, never hardcode credentials
-    - Never install dev dependencies in the final image
-
-    ## docker-compose.yml requirements
-
-    Include ALL services required to run the application locally — not just the app itself.
-    Derive infrastructure services from the specs (databases, caches, queues, object storage, etc.).
-
-    For each infrastructure service (derived solely from the specs — do not add services not mentioned):
-    - Use the official lightweight image for that technology
-    - Expose the standard port(s) for that service so it is reachable from the host
-    - Add a healthcheck using the correct format:
-        RULE: test MUST start with "CMD" or "CMD-SHELL" as the first array element.
-        Use "CMD" only when every argument is a separate element, e.g.:
-          `test: ["CMD", "redis-cli", "ping"]`
-        Use "CMD-SHELL" when the command contains shell syntax, flags, or pipes, e.g.:
-          `test: ["CMD-SHELL", "pg_isready -U myuser"]`
-          `test: ["CMD-SHELL", "curl -f http://localhost:9000/health || exit 1"]`
-        NEVER put a shell command with flags as a single argument to "CMD".
-        For MinIO specifically use: `test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live || exit 1"]`
-    - For object-storage services (MinIO):
-        - add `command: server /data` so the server actually starts
-        - use `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` (NOT the deprecated MINIO_ACCESS_KEY / MINIO_SECRET_KEY)
-    - ALL services must have a named volume for data persistence (including redis and rabbitmq)
-    - ALL services must have restart: unless-stopped
-
-    For the application service:
-    - build: .
-    - Port mapping matching the exposed port
-    - env_file: .env
-    - restart: unless-stopped
-    - depends_on every infrastructure service using condition: service_healthy, e.g.:
-        ```yaml
-        depends_on:
-          <service-name>:
-            condition: service_healthy
-        ```
-
-    Declare all named volumes at the bottom under a top-level `volumes:` key.
-
-    ## .env.example requirements
-
-    Generate a `.env.example` with ONLY the variables the application source code reads at runtime.
-    These are connection strings and config values consumed by the app — NOT bootstrap credentials
-    for configuring infra services (those belong in docker-compose.yml environment blocks).
-
-    RULE: every variable must be a URL or config the app passes to a client library.
-    NEVER include raw credentials like POSTGRES_USER, POSTGRES_PASSWORD, MINIO_ACCESS_KEY, etc.
-    Those are docker-compose internals; they must NOT appear in .env.example.
-
-    Variable naming and default values by service type (use real defaults so `cp .env.example .env`
-    is enough to run `docker-compose up` immediately — no manual editing required):
-    - PostgreSQL  → DATABASE_URL=postgresql://postgres:postgres@postgres:5432/app
-    - Redis       → REDIS_URL=redis://redis:6379/0
-    - RabbitMQ    → AMQP_URL=amqp://guest:guest@rabbitmq:5672/
-    - MinIO / S3  → S3_ENDPOINT_URL=http://s3:9000
-                    S3_ACCESS_KEY=minioadmin
-                    S3_SECRET_KEY=minioadmin
-                    S3_BUCKET_NAME=app-bucket
-
-    CRITICAL: the credentials embedded in these URLs must match the values set in the
-    docker-compose.yml environment blocks for the corresponding infra service.
-    Use the docker-compose service name as the hostname in every URL.
-    Group variables by service with a comment header, one variable per line.
-
-    ## .dockerignore requirements
-
-    Must exclude (one entry per line, no comments):
-    .env
-    venv/
-    __pycache__/
-    .git/
-    *.pyc
-    *.pyo
-    tests/
-    *.md
-    .mypy_cache/
-    dist/
-    build/
-    *.egg-info/
+# ─── GENERATION PHASE ─────────────────────────────────────────────────────────
+
+generate:
+  ci_system: |
+    You are the DevOps Agent (CI generation phase) of a multi-agent software factory.
+
+    You will receive the file path to generate, the application specifications,
+    the source file list, and a hint describing the file's role and purpose.
+
+    ## Output rules
+    - Return ONLY raw file content. No markdown fences, no preamble, no explanation.
+    - Content must be complete and production-ready — no TODOs or stubs.
+    - Derive all project-specific values (name, services) from the specifications.
+
+    ## CI rules
+    - Workflow must be valid YAML runnable on GitHub Actions without modification.
+    - Use only the pinned action SHAs provided — never use `latest` tags.
+    - Dev tooling (ruff, pytest, pip-audit) stays in CI only — never in runtime deps.
+
+    ## Developer helper files
+    Always generate the following companion files alongside the CI workflow to make
+    local development self-contained and contributor-friendly:
+    - Makefile            — one-command shortcuts (install, lint, test, format, check)
+    - requirements-dev.txt — pinned dev/test deps (pytest, ruff, pip-audit)
+    - pyproject.toml      — project metadata + ruff linter/formatter config
+    - .gitignore          — Python-tailored ignore rules
+
+  cd_system: |
+    You are the DevOps Agent (CD generation phase) of a multi-agent software factory.
+
+    You will receive the file path to generate, the application specifications,
+    the source file list, and a hint describing the file's role and purpose.
+
+    ## Output rules
+    - Return ONLY raw file content. No markdown fences, no preamble, no explanation.
+    - Content must be complete and production-ready — no TODOs or stubs.
+    - Derive all project-specific values (name, port, services) from the specifications.
+
+    ## CD rules
+    - Never install dev dependencies in runtime images.
+    - Only include infrastructure services explicitly mentioned in the specs — not app services.
+    - Infra services in docker-compose use hardcoded local credentials; app config goes in .env.
+
+# ─── FILE-SPECIFIC HINTS ──────────────────────────────────────────────────────
+
+file_hint:
+
+  # ── CI files ─────────────────────────────────────────────────────────────────
+
+  ci_workflow: |
+    Generate a GitHub Actions CI workflow (.github/workflows/ci.yml).
+    The workflow name MUST be exactly: "CI"
+    Trigger on push and pull_request to main. Use concurrency to cancel duplicate runs.
+    Two parallel jobs:
+      lint: checkout → setup-python 3.12 → pip install requirements-dev.txt → ruff check + ruff format --check
+      test: checkout → setup-python matrix [3.11, 3.12] → pip cache → pip install backend/requirements.txt + requirements-dev.txt → pytest → pip-audit → pip-audit --format cyclonedx -o sbom.json (upload as artifact)
+    Use ONLY these exact pinned action references — never substitute other versions:
+      checkout:     {checkout}
+      setup-python: {setup_python}
+      cache:        {cache}
+
+  pyproject_toml: |
+    Generate pyproject.toml with [project] (name from specs, version 0.1.0, requires-python >=3.11).
+    Use proper TOML sub-table structure: [tool.ruff], [tool.ruff.lint], [tool.ruff.format],
+    [tool.ruff.lint.per-file-ignores], [tool.ruff.lint.pydocstyle], [tool.ruff.lint.isort].
+    lint.select: ["E","W","F","I","N","D","UP","B","C4","SIM","ANN","S","PTH","RET","ARG","RUF","TRY"]
+    lint.ignore: ["D203","D213","E501","ANN401","D107","COM812","ISC001","TRY003"]
+    per-file-ignores: __init__.py→["F401","D104"], test files→["D","ANN","S101"]
+    format.quote-style = "double". pydocstyle.convention = "google".
+
+  gitignore: |
+    Generate a .gitignore for a Python project.
+    Cover: bytecode and cache directories, virtual environments, build/dist artifacts,
+    secrets (.env files), tool caches (mypy, ruff, pytest, coverage),
+    and common IDE directories (.idea, .vscode).
+
+  makefile: |
+    Generate a Makefile with developer shortcuts.
+    CRITICAL: every recipe line must start with a real TAB character (ASCII 0x09), not spaces.
+    Activate venv before every command with: source venv/bin/activate && <command>
+    Prefix every recipe line with @ to suppress echoing. Print a description with @echo first.
+    Declare all targets in .PHONY: help, create-venv, install, install-dev,
+    format, lint-with-auto-fix, lint-with-auto-unsafe-fix, test, check.
+
+  # ── CD files ─────────────────────────────────────────────────────────────────
+
+  dockerfile: |
+    Generate a multi-stage Dockerfile. Use python:3.12-slim for both stages.
+    Pin the base image by digest for production hardening (e.g. python:3.12-slim@sha256:<digest>).
+    If the exact digest is unknown, use the tag python:3.12-slim and add a comment: # TODO: pin to digest for production.
+    Stage 1 (builder): RUN python -m venv /venv then /venv/bin/pip install from backend/requirements.txt.
+    Stage 2 (final): COPY --from=builder /venv /venv, set ENV PATH="/venv/bin:$PATH",
+    install curl (for HEALTHCHECK) before switching to a non-root user, COPY source, EXPOSE port.
+    Add curl-based HEALTHCHECK. Set CMD to the correct entrypoint derived from specs. Example:
+      COPY --from=builder /venv /venv
+      ENV PATH="/venv/bin:$PATH"
+
+  docker_compose: |
+    Generate a docker-compose.yml. Include the app service (build: ., env_file: .env)
+    and ONLY external infrastructure services the app connects to: databases, caches,
+    queues, object storage. NEVER add application microservices or services from the specs.
+    Each infra service: pinned official image, exposed ports, healthcheck, named volume,
+    restart: unless-stopped, hardcoded credentials (never ${VAR} references).
+    app.depends_on must use condition: service_healthy for every infra service. Example:
+      depends_on:
+        postgres:
+          condition: service_healthy
+
+  env: |
+    Generate .env with infra connection URLs only — one per infrastructure service in docker-compose.
+    Use docker-compose service names as hostnames and the hardcoded credentials from docker-compose.
+    Do NOT include application service URLs, microservice addresses, or variables unrelated to infra.
+    Provide ready-to-use values so `docker-compose up` works immediately. Group by service with a comment header.
+
+  env_example: |
+    Generate .env.example with the exact same content as .env — same keys, same ready-to-use default values.
+    This file is committed to the repo as documentation; .env is gitignored.
+    Use docker-compose service names as hostnames and the hardcoded credentials from docker-compose. Example:
+      # Database
+      DATABASE_URL=postgresql://postgres:postgres@postgres:5432/app
+
+  dockerignore: |
+    Generate a .dockerignore file. Output raw lines only — no filename header, no markdown, no fences.
+    Exclude: virtual environments (venv/, .venv/), Python bytecode and cache (__pycache__/, *.pyc),
+    git directory (.git/), test directories, build/dist artifacts, secrets (.env),
+    and documentation files (*.md).
+
+  cd_workflow: |
+    Generate a GitHub Actions CD workflow (.github/workflows/cd.yml).
+    The workflow name MUST be exactly: "CD"
+    Trigger using workflow_run on the workflow named "CI", on completed event, for the main branch.
+    Set permissions: contents: read, packages: write.
+    The build-and-push job MUST have: if: github.event.workflow_run.conclusion == 'success'
+    Steps: checkout, then store the lowercase image name in an env var using:
+      IMAGE=ghcr.io/$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+    Log in to GHCR using docker/login-action with registry ghcr.io and GITHUB_TOKEN.
+    Build and push using docker/build-push-action with two tags: $IMAGE:latest and $IMAGE:$(echo "${{ github.sha }}" | cut -c1-7).
