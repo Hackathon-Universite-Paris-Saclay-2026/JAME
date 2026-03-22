@@ -12,10 +12,12 @@ Implements an AIDLC-inspired four-phase workflow:
               before handing off to QA.
 
 Architecture enforced across all generated projects:
-  Router → Service → Repository/DB → Model
+  Router -> Service -> Repository/DB -> Model
 """
 
 from __future__ import annotations
+
+from pathlib import PurePosixPath
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -44,7 +46,7 @@ from integrations.cortex import get_cortex_llm
 
 
 # ---------------------------------------------------------------------------
-# Mandatory files — always present in every generated project
+# Constants
 # ---------------------------------------------------------------------------
 
 MANDATORY_FILES = [
@@ -58,14 +60,7 @@ MANDATORY_FILES = [
     "frontend/package.json",
 ]
 
-# ---------------------------------------------------------------------------
-# AIDLC-inspired: Architectural layer ordering for dependency-aware generation.
-# Files are generated bottom-up so that each file can reference the actual
-# interfaces of its dependencies (already generated in earlier layers).
-# ---------------------------------------------------------------------------
-
 LAYER_ORDER: list[tuple[str, int]] = [
-    # (path pattern, priority — lower = generated first)
     ("backend/database.py", 0),
     ("backend/models.py", 1),
     ("backend/services/", 2),
@@ -78,30 +73,6 @@ LAYER_ORDER: list[tuple[str, int]] = [
     ("tests/conftest.py", 9),
     ("tests/", 10),
 ]
-
-
-def _layer_priority(file_path: str) -> int:
-    """Return the generation priority for a file based on its architectural layer.
-
-    Lower values are generated first so their content is available as
-    cross-reference context for higher layers.
-
-    Args:
-        file_path: Sanitized relative path of the file.
-
-    Returns:
-        An integer priority (0 = first, 99 = fallback).
-    """
-    for pattern, priority in LAYER_ORDER:
-        if file_path == pattern or file_path.startswith(pattern):
-            return priority
-    return 99
-
-
-# ---------------------------------------------------------------------------
-# Import graph — prevents circular dependencies across generated files.
-# Each key is a file pattern; value is the list of local modules it may import.
-# ---------------------------------------------------------------------------
 
 IMPORT_GRAPH: dict[str, list[str]] = {
     "backend/main.py": ["backend/routers/*", "backend/database.py"],
@@ -123,12 +94,6 @@ IMPORT_GRAPH: dict[str, list[str]] = {
     "frontend/src/App.js": ["frontend/src/components/*"],
 }
 
-# ---------------------------------------------------------------------------
-# AIDLC-inspired: Dependency mapping for cross-file context.
-# When generating file X, include the content of its dependency files so the
-# LLM uses actual interfaces instead of guessing.
-# ---------------------------------------------------------------------------
-
 DEPENDENCY_MAP: dict[str, list[str]] = {
     "backend/models.py": ["backend/database.py"],
     "backend/services/*.py": ["backend/models.py", "backend/database.py"],
@@ -148,68 +113,83 @@ DEPENDENCY_MAP: dict[str, list[str]] = {
     "frontend/src/components/*": [],
 }
 
-# ---------------------------------------------------------------------------
-# Error severity (AIDLC-inspired)
-# ---------------------------------------------------------------------------
+LIGHTWEIGHT_SCOPES = ("function", "feature")
+
+_EXT_TO_LANG = {
+    ".py": "python",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".json": "json",
+    ".yaml": "yaml",
+    ".yml": "yaml",
+    ".txt": "text",
+    ".md": "markdown",
+    ".html": "html",
+    ".css": "css",
+}
 
 _SEVERITY_LABELS = {
-    "critical": "CRITICAL",  # Generation cannot continue
-    "high": "HIGH",  # Current file blocked
-    "medium": "MEDIUM",  # Partial progress possible
-    "low": "LOW",  # Non-blocking warning
+    "critical": "CRITICAL",
+    "high": "HIGH",
+    "medium": "MEDIUM",
+    "low": "LOW",
 }
 
 
+# ---------------------------------------------------------------------------
+# Utilities
+# ---------------------------------------------------------------------------
+
+
 def _log(level: str, phase: str, msg: str) -> None:
-    """Print a structured log message with severity and phase.
-
-    Args:
-        level: One of 'critical', 'high', 'medium', 'low', or 'info'.
-        phase: AIDLC phase label (DESIGN, PLAN, ACT, VALIDATE, REASON).
-        msg: Human-readable log message.
-    """
-    label = _SEVERITY_LABELS.get(level, "INFO")
-    print(f"[{phase}] [{label}] {msg}")
+    """Print a structured log line with severity and phase."""
+    print(f"[{phase}] [{_SEVERITY_LABELS.get(level, 'INFO')}] {msg}")
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+def _detect_language(path: str) -> str:
+    """Infer the programming language from a file's extension."""
+    return _EXT_TO_LANG.get(PurePosixPath(path).suffix, "text")
 
 
-def _resolve_import_graph(file_path: str) -> list[str]:
-    """Return the allowed local imports for a given file path.
+def _strip_markdown_fences(content: str) -> str:
+    """Remove wrapping ``` fences if the LLM added them despite instructions."""
+    content = content.strip()
+    if content.startswith("```"):
+        first_nl = content.find("\n")
+        if first_nl != -1:
+            content = content[first_nl + 1 :]
+    if content.rstrip().endswith("```"):
+        content = content.rstrip()[:-3].rstrip()
+    return content
 
-    Matches exact keys first, then falls back to wildcard patterns.
 
-    Args:
-        file_path: Sanitized relative path of the file being generated.
-
-    Returns:
-        List of allowed import targets as human-readable strings.
-    """
-    if file_path in IMPORT_GRAPH:
-        return IMPORT_GRAPH[file_path]
-    for pattern, deps in IMPORT_GRAPH.items():
-        if "*" in pattern:
-            prefix = pattern.split("*")[0]
-            if file_path.startswith(prefix):
-                return deps
+def _match_wildcard(file_path: str, mapping: dict[str, list[str]]) -> list[str]:
+    """Look up *file_path* in a dict whose keys may contain ``*`` wildcards."""
+    if file_path in mapping:
+        return mapping[file_path]
+    for pattern, value in mapping.items():
+        if "*" in pattern and file_path.startswith(pattern.split("*")[0]):
+            return value
     return []
 
 
+def _layer_priority(file_path: str) -> int:
+    """Return the generation priority for *file_path* (lower = generated first)."""
+    for pattern, priority in LAYER_ORDER:
+        if file_path == pattern or file_path.startswith(pattern):
+            return priority
+    return 99
+
+
+def _sort_by_layer(file_paths: list[str]) -> list[str]:
+    """Sort file paths by architectural layer priority (bottom-up)."""
+    return sorted(file_paths, key=_layer_priority)
+
+
 def _get_file_hint(file_path: str) -> str:
-    """Return the generation hint for a given file path.
-
-    Checks the static FILE_CONTEXT dict first, then falls back to
-    pattern-based hints for routers, services, and React components.
-
-    Args:
-        file_path: Sanitized relative path of the file being generated.
-
-    Returns:
-        A string instruction describing what the file should contain.
-    """
+    """Return the generation hint for a given file path."""
     if file_path in FILE_CONTEXT:
         return FILE_CONTEXT[file_path]
     if "routers/" in file_path:
@@ -221,65 +201,9 @@ def _get_file_hint(file_path: str) -> str:
     return f"Generate the complete, production-quality content for: {file_path}"
 
 
-def _detect_language(path: str) -> str:
-    """Infer the programming language from a file's extension.
-
-    Args:
-        path: Relative file path.
-
-    Returns:
-        A lowercase language string suitable for syntax highlighting.
-    """
-    ext_map = {
-        ".py": "python",
-        ".js": "javascript",
-        ".jsx": "javascript",
-        ".ts": "typescript",
-        ".tsx": "typescript",
-        ".json": "json",
-        ".yaml": "yaml",
-        ".yml": "yaml",
-        ".txt": "text",
-        ".md": "markdown",
-        ".html": "html",
-        ".css": "css",
-    }
-    for ext, lang in ext_map.items():
-        if path.endswith(ext):
-            return lang
-    return "text"
-
-
-def _strip_markdown_fences(content: str) -> str:
-    """Remove wrapping ``` fences if the LLM added them despite instructions.
-
-    Args:
-        content: Raw string returned by the LLM.
-
-    Returns:
-        Content with opening and closing fences stripped.
-    """
-    content = content.strip()
-    if content.startswith("```"):
-        first_nl = content.find("\n")
-        if first_nl != -1:
-            content = content[first_nl + 1 :]
-    if content.rstrip().endswith("```"):
-        content = content.rstrip()[:-3].rstrip()
-    return content
-
-
 def _build_import_hint(file_path: str) -> str:
-    """Build a prompt section describing allowed local imports for a file.
-
-    Args:
-        file_path: Sanitized relative path of the file being generated.
-
-    Returns:
-        A formatted string to inject into the user prompt, or a
-        no-imports constraint message if the file has no allowed local imports.
-    """
-    allowed = _resolve_import_graph(file_path)
+    """Build a prompt section describing allowed local imports for a file."""
+    allowed = _match_wildcard(file_path, IMPORT_GRAPH)
     if not allowed:
         return (
             "\n## Import constraints\n"
@@ -296,29 +220,11 @@ def _build_import_hint(file_path: str) -> str:
 def _resolve_dependencies(file_path: str, generated: dict[str, dict]) -> str:
     """Build a cross-reference context section with already-generated dependency content.
 
-    AIDLC-inspired: Instead of making the LLM guess function signatures and
-    class names, we pass the actual content of dependency files so it can
-    match interfaces exactly.
-
-    Args:
-        file_path: Sanitized relative path of the file being generated.
-        generated: Dict mapping path → CodeFile dict for already-generated files.
-
-    Returns:
-        A formatted string with dependency file contents, or empty string
-        if no dependencies are available.
+    Instead of making the LLM guess function signatures and class names,
+    we pass the actual content of dependency files so it can match
+    interfaces exactly.
     """
-    dep_patterns: list[str] = []
-    for pattern, deps in DEPENDENCY_MAP.items():
-        if file_path == pattern:
-            dep_patterns = deps
-            break
-        if "*" in pattern:
-            prefix = pattern.split("*")[0]
-            if file_path.startswith(prefix):
-                dep_patterns = deps
-                break
-
+    dep_patterns = _match_wildcard(file_path, DEPENDENCY_MAP)
     if not dep_patterns:
         return ""
 
@@ -337,14 +243,12 @@ def _resolve_dependencies(file_path: str, generated: dict[str, dict]) -> str:
         for dep_path, dep_file in matching.items():
             content = dep_file.get("content", "")
             if content:
-                # Truncate very large files to keep the prompt manageable
                 if len(content) > 4000:
                     content = content[:4000] + "\n# ... (truncated for brevity)"
                 sections.append(f"### {dep_path}\n```\n{content}\n```")
 
     if not sections:
         return ""
-
     return (
         "\n## Already-generated dependency files (use EXACT interfaces)\n"
         "Match function signatures, class names, and field names exactly.\n\n"
@@ -352,84 +256,301 @@ def _resolve_dependencies(file_path: str, generated: dict[str, dict]) -> str:
     )
 
 
-def _sort_by_layer(file_paths: list[str]) -> list[str]:
-    """Sort file paths by architectural layer priority.
+# ---------------------------------------------------------------------------
+# LLM invocation (unified structured → raw fallback)
+# ---------------------------------------------------------------------------
 
-    AIDLC-inspired: Files are generated bottom-up (models before services,
-    services before routers) so cross-file context is available.
 
-    Args:
-        file_paths: Unsorted list of relative file paths.
+def _invoke_llm(
+    llm: BaseChatModel,
+    system_prompt: str,
+    user_msg: str,
+    *,
+    schema: type | None = None,
+    phase: str = "ACT",
+) -> str | None:
+    """Call the LLM with optional structured output, falling back to raw.
 
-    Returns:
-        The same paths sorted by generation priority (lowest first).
+    Returns the extracted content string, or ``None`` on total failure.
     """
-    return sorted(file_paths, key=_layer_priority)
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=user_msg),
+    ]
+    if schema is not None:
+        try:
+            result = llm.with_structured_output(schema).invoke(messages)
+        except Exception as e:
+            _log(
+                "medium",
+                phase,
+                f"Structured failed ({type(e).__name__}), trying raw …",
+            )
+        else:
+            return result.content
+    try:
+        return llm.invoke(messages).content
+    except Exception as e:
+        _log("high", phase, f"LLM call failed ({type(e).__name__})")
+    return None
 
 
 # ---------------------------------------------------------------------------
-# Phase 1: Functional Design (AIDLC-inspired)
+# Single-file generation (shared by full-stack loop + auto-fix)
+# ---------------------------------------------------------------------------
+
+
+def _build_file_prompt(
+    file_path: str,
+    specs: str,
+    functional_design: str,
+    generated: dict[str, dict],
+    file_issues: str = "",
+) -> str:
+    """Assemble the full user message for generating one file."""
+    dep_context = _resolve_dependencies(file_path, generated)
+    if dep_context:
+        print(
+            f"[ACT]    \u21b3 Injecting {dep_context.count('###')} "
+            "dependency file(s) as context"
+        )
+
+    msg = f"## Application Specifications\n{specs}\n\n"
+    if functional_design:
+        msg += f"## Functional Design\n{functional_design}\n\n"
+    msg += (
+        f"## File to generate\nPath: `{file_path}`\n\n"
+        f"## Instructions\n{_get_file_hint(file_path)}"
+        f"{_build_import_hint(file_path)}"
+        f"{dep_context}"
+        f"{file_issues}"
+    )
+    return msg
+
+
+def _generate_file(
+    llm: BaseChatModel,
+    file_path: str,
+    specs: str,
+    functional_design: str,
+    generated: dict[str, dict],
+    file_issues: str = "",
+) -> dict | None:
+    """Generate a single file. Returns its dict or ``None`` on failure."""
+    user_msg = _build_file_prompt(
+        file_path, specs, functional_design, generated, file_issues
+    )
+    content = _invoke_llm(
+        llm,
+        GENERATE_SYSTEM_PROMPT,
+        user_msg,
+        schema=SingleFileContent,
+        phase="ACT",
+    )
+    if content is None:
+        return None
+
+    content = _strip_markdown_fences(content)
+    if not content.strip():
+        _log("high", "ACT", f"Empty content for {file_path}, skipping")
+        return None
+
+    print(f"[ACT]    \u2713 {len(content)} chars")
+    return {
+        "path": file_path,
+        "content": content,
+        "language": _detect_language(file_path),
+    }
+
+
+def _collect_file_issues(
+    file_path: str,
+    qa_issues: list[dict],
+    qa_feedback: str,
+    iteration: int,
+) -> str:
+    """Return QA feedback relevant to a specific file."""
+    if qa_issues and iteration > 0:
+        relevant = [
+            iss for iss in qa_issues if iss["file"] in (file_path, "GENERAL")
+        ]
+        if relevant:
+            return "\n## QA issues to fix in THIS file:\n" + "\n".join(
+                f"- [{iss['severity'].upper()}] {iss['description']}"
+                for iss in relevant
+            )
+    elif qa_feedback and iteration > 0:
+        return (
+            f"\n## QA feedback (address what is relevant to this file):\n"
+            f"{qa_feedback}"
+        )
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# Phase 1: Functional Design
 # ---------------------------------------------------------------------------
 
 
 def _run_functional_design(llm: BaseChatModel, specs: str) -> str:
-    """Extract a technology-agnostic functional design from the specs.
-
-    Identifies domain entities, business rules, API endpoints, component
-    dependencies, and NFR considerations before any code is generated.
-
-    Args:
-        llm: LangChain LLM instance.
-        specs: Application specifications from the Architect agent.
-
-    Returns:
-        The functional design analysis as a string, or empty string on failure.
-    """
-    print("\n[DESIGN] Extracting functional design from specifications …")
-    try:
-        design_llm = llm.with_structured_output(FunctionalDesign)
-        result: FunctionalDesign = design_llm.invoke(
-            [
-                SystemMessage(content=FUNCTIONAL_DESIGN_SYSTEM_PROMPT),
-                HumanMessage(content=f"## Application Specifications\n{specs}"),
-            ]
-        )
-        design = result.content
+    """Extract a technology-agnostic functional design from the specs."""
+    print("\n[DESIGN] Extracting functional design from specifications \u2026")
+    design = _invoke_llm(
+        llm,
+        FUNCTIONAL_DESIGN_SYSTEM_PROMPT,
+        f"## Application Specifications\n{specs}",
+        schema=FunctionalDesign,
+        phase="DESIGN",
+    )
+    if design:
         print(
             f"[DESIGN] [INFO] Functional design extracted ({len(design)} chars)"
         )
-    except Exception as e:
-        print(
-            f"[DESIGN] [MEDIUM] Structured design failed ({type(e).__name__}), trying raw …"
-        )
-        try:
-            response = llm.invoke(
-                [
-                    SystemMessage(content=FUNCTIONAL_DESIGN_SYSTEM_PROMPT),
-                    HumanMessage(
-                        content=f"## Application Specifications\n{specs}"
-                    ),
-                ]
-            )
-            design = response.content
-            print(
-                f"[DESIGN] [INFO] Functional design extracted via raw ({len(design)} chars)"
-            )
-        except Exception as e2:
-            _log(
-                "high",
-                "DESIGN",
-                f"Functional design extraction failed ({type(e2).__name__}). Proceeding without it.",
-            )
-            return ""
-        else:
-            return design
-    else:
         return design
+    _log(
+        "high",
+        "DESIGN",
+        "Functional design extraction failed. Proceeding without it.",
+    )
+    return ""
 
 
 # ---------------------------------------------------------------------------
-# Phase 4: Self-Validation (AIDLC-inspired)
+# Phase 2: File Planning
+# ---------------------------------------------------------------------------
+
+
+def _run_file_planning(
+    llm: BaseChatModel,
+    specs: str,
+    functional_design: str,
+    qa_issues: list[dict],
+    qa_feedback: str,
+    iteration: int,
+) -> tuple[list[str], str]:
+    """Determine which files to generate. Returns ``(file_plan, plan_trace)``."""
+    file_plan: list[str] | None = None
+
+    # Retry with structured QA issues — only regenerate flagged files.
+    if qa_issues and iteration > 0:
+        plan_trace = f"Iteration {iteration}: regenerating files flagged by QA."
+        print(f"\n[PLAN] {plan_trace}")
+
+        flagged = {
+            _sanitize_path(iss["file"])
+            for iss in qa_issues
+            if iss["file"] != "GENERAL"
+        }
+        has_general = any(iss["file"] == "GENERAL" for iss in qa_issues)
+        file_plan = (
+            list(MANDATORY_FILES)
+            if (has_general or not flagged)
+            else list(flagged)
+        )
+        print(f"[PLAN] Files to (re)generate: {file_plan}")
+
+    # Retry with legacy string feedback — regenerate everything.
+    elif qa_feedback and iteration > 0:
+        plan_trace = (
+            f"Iteration {iteration}: revising all code based on QA feedback."
+        )
+        print(f"\n[PLAN] {plan_trace}")
+
+    # First pass — ask the LLM.
+    else:
+        plan_trace = "First pass: planning files then generating code."
+        print(f"\n[PLAN] {plan_trace}")
+
+    # Ask LLM for plan when not pre-determined by QA issues.
+    if file_plan is None:
+        print("[PLAN] Asking LLM for file plan \u2026")
+        plan_msg = f"## Specifications\n{specs}"
+        if functional_design:
+            plan_msg += f"\n\n## Functional Design\n{functional_design}"
+        if qa_feedback and iteration > 0:
+            plan_msg += f"\n\n## QA Issues to address\n{qa_feedback}"
+
+        try:
+            plan_llm = llm.with_structured_output(FilePlan)
+            result: FilePlan = plan_llm.invoke(
+                [
+                    SystemMessage(content=PLAN_SYSTEM_PROMPT),
+                    HumanMessage(content=plan_msg),
+                ]
+            )
+            file_plan = [_sanitize_path(f) for f in result.files]
+        except Exception as e:
+            _log(
+                "medium",
+                "PLAN",
+                f"Structured plan failed ({type(e).__name__}), using mandatory list.",
+            )
+            file_plan = list(MANDATORY_FILES)
+
+        # Guarantee mandatory files are always present.
+        for mf in MANDATORY_FILES:
+            if not any(mf in fp for fp in file_plan):
+                file_plan.append(mf)
+
+    file_plan = _sort_by_layer(file_plan)
+    print(
+        f"[PLAN] File plan ({len(file_plan)} files, dependency-ordered): {file_plan}"
+    )
+    return file_plan, plan_trace
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: Code Generation
+# ---------------------------------------------------------------------------
+
+
+def _run_code_generation(
+    llm: BaseChatModel,
+    file_plan: list[str],
+    specs: str,
+    functional_design: str,
+    existing_files: dict[str, dict],
+    qa_issues: list[dict],
+    qa_feedback: str,
+    iteration: int,
+) -> tuple[list[dict], dict[str, dict]]:
+    """Generate all planned files. Returns ``(code_files, generated_map)``."""
+    code_files: list[dict] = []
+    generated: dict[str, dict] = {}
+
+    # Pre-populate context from prior iteration so dependencies are available.
+    if iteration > 0 and existing_files:
+        generated.update(existing_files)
+
+    for i, file_path in enumerate(file_plan, 1):
+        file_path = _sanitize_path(file_path)
+        print(
+            f"\n[ACT]  Generating file {i}/{len(file_plan)}: {file_path} \u2026"
+        )
+
+        file_issues = _collect_file_issues(
+            file_path, qa_issues, qa_feedback, iteration
+        )
+        result = _generate_file(
+            llm, file_path, specs, functional_design, generated, file_issues
+        )
+        if result:
+            code_files.append(result)
+            generated[file_path] = result
+
+    # Preserve existing files that were not regenerated on retry.
+    if iteration > 0 and existing_files:
+        regenerated_paths = {f["path"] for f in code_files}
+        for path, old_file in existing_files.items():
+            if path not in regenerated_paths:
+                code_files.append(old_file)
+                print(f"[ACT]  Kept existing file: {path}")
+
+    return code_files, generated
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: Self-Validation
 # ---------------------------------------------------------------------------
 
 
@@ -438,44 +559,34 @@ def _run_self_validation(
 ) -> list[dict]:
     """Check consistency across all generated files before QA.
 
-    Validates import consistency, interface matching, route registration,
-    test coverage, and dependency completeness.
-
-    Args:
-        llm: LangChain LLM instance.
-        code_files: List of generated CodeFile dicts.
-
-    Returns:
-        List of issue dicts (empty if validation passed).
+    Returns a list of issue dicts (empty if validation passed).
     """
     if not code_files:
         return []
 
-    print("\n[VALIDATE] Running self-validation on generated files …")
+    print("\n[VALIDATE] Running self-validation on generated files \u2026")
 
-    # Build a summary of all files for the validation prompt
     file_summary = []
     for f in code_files:
         content = f.get("content", "")
-        # Truncate to keep prompt within limits
         if len(content) > 3000:
             content = content[:3000] + "\n# ... (truncated)"
         file_summary.append(
             f"### {f['path']}\n```{f.get('language', '')}\n{content}\n```"
         )
 
-    all_files_text = "\n\n".join(file_summary)
-
     try:
         val_llm = llm.with_structured_output(ValidationResult)
         result: ValidationResult = val_llm.invoke(
             [
                 SystemMessage(content=VALIDATE_SYSTEM_PROMPT),
-                HumanMessage(content=f"## Generated Files\n\n{all_files_text}"),
+                HumanMessage(
+                    content="## Generated Files\n\n" + "\n\n".join(file_summary)
+                ),
             ]
         )
         if result.passed:
-            print("[VALIDATE] [INFO] ✓ All consistency checks passed")
+            print("[VALIDATE] [INFO] \u2713 All consistency checks passed")
             return []
 
         issues = [
@@ -506,33 +617,85 @@ def _run_self_validation(
         return issues
 
 
+def _run_auto_fix(
+    llm: BaseChatModel,
+    code_files: list[dict],
+    generated: dict[str, dict],
+    validation_issues: list[dict],
+    specs: str,
+    functional_design: str,
+) -> None:
+    """Auto-fix files with critical/major validation issues. Mutates *code_files* in place."""
+    critical_files = {
+        iss["file"]
+        for iss in validation_issues
+        if iss["severity"] in ("critical", "major")
+    }
+    if not critical_files:
+        return
+
+    print(
+        f"\n[VALIDATE] Auto-fixing {len(critical_files)} file(s) "
+        "with critical/major issues \u2026"
+    )
+    fix_text = "\n".join(
+        f"- [{iss['severity'].upper()}] {iss['file']}: {iss['description']}"
+        for iss in validation_issues
+    )
+
+    for file_path in critical_files:
+        file_idx = next(
+            (i for i, f in enumerate(code_files) if f["path"] == file_path),
+            None,
+        )
+        if file_idx is None:
+            continue
+
+        print(f"[VALIDATE] Regenerating: {file_path} \u2026")
+        result = _generate_file(
+            llm,
+            file_path,
+            specs,
+            functional_design,
+            generated,
+            file_issues=f"\n## Consistency issues to fix in THIS file:\n{fix_text}",
+        )
+        if result:
+            code_files[file_idx] = result
+            generated[file_path] = result
+
+
 # ---------------------------------------------------------------------------
 # Lightweight path (function / feature scope)
 # ---------------------------------------------------------------------------
 
-LIGHTWEIGHT_SCOPES = ("function", "feature")
+
+def _resolve_all_generated(generated: dict[str, dict]) -> str:
+    """Build cross-reference from *all* already-generated files (lightweight path)."""
+    if not generated:
+        return ""
+    parts = [
+        f"### {p}\n```\n{f['content']}\n```"
+        for p, f in generated.items()
+        if f.get("content")
+    ]
+    if not parts:
+        return ""
+    return (
+        "\n## Already-generated files (use EXACT interfaces)\n"
+        + "\n\n".join(parts)
+    )
 
 
 def _run_lightweight(llm: BaseChatModel, scope: str, specs: str) -> list[dict]:
     """Generate code for a function- or feature-level request.
 
-    Skips the full-stack pipeline entirely — no backend/frontend scaffolding,
-    no database, no routers/services.  Produces only the minimal files the
-    user actually needs (e.g. ``fibonacci.py`` + ``test_fibonacci.py``).
-
-    Args:
-        llm: LangChain LLM instance.
-        scope: Either ``"function"`` or ``"feature"``.
-        specs: Focused specification from the Architect.
-
-    Returns:
-        List of generated CodeFile dicts.
+    Skips the full-stack pipeline entirely — produces only the minimal files
+    the user actually needs (e.g. ``fibonacci.py`` + ``test_fibonacci.py``).
     """
-    print(f"\n[PLAN] Lightweight scope ({scope}) — minimal file set")
+    print(f"\n[PLAN] Lightweight scope ({scope}) \u2014 minimal file set")
 
-    # Step 1: ask LLM for a minimal file plan
     plan_prompt = LIGHTWEIGHT_PLAN_SYSTEM_PROMPT.format(scope=scope)
-    file_plan: list[str] = []
     try:
         plan_llm = llm.with_structured_output(FilePlan)
         result: FilePlan = plan_llm.invoke(
@@ -548,81 +711,47 @@ def _run_lightweight(llm: BaseChatModel, scope: str, specs: str) -> list[dict]:
             "PLAN",
             f"Structured plan failed ({type(e).__name__}), using fallback.",
         )
+        file_plan = []
 
-    # Fallback: one source file + one test file
     if not file_plan:
         file_plan = ["solution.py", "test_solution.py"]
-
     print(f"[PLAN] Files: {file_plan}")
 
-    # Step 2: generate each file
     gen_prompt = LIGHTWEIGHT_GENERATE_SYSTEM_PROMPT.format(scope=scope)
     code_files: list[dict] = []
     generated: dict[str, dict] = {}
 
     for i, file_path in enumerate(file_plan, 1):
         file_path = _sanitize_path(file_path)
-        language = _detect_language(file_path)
-        print(f"\n[ACT]  Generating file {i}/{len(file_plan)}: {file_path} …")
-
-        # Build cross-reference from already-generated files (for test files)
-        dep_section = ""
-        if generated:
-            dep_parts = []
-            for dep_path, dep_file in generated.items():
-                content = dep_file.get("content", "")
-                if content:
-                    dep_parts.append(f"### {dep_path}\n```\n{content}\n```")
-            if dep_parts:
-                dep_section = (
-                    "\n## Already-generated files (use EXACT interfaces)\n"
-                    + "\n\n".join(dep_parts)
-                )
+        print(
+            f"\n[ACT]  Generating file {i}/{len(file_plan)}: {file_path} \u2026"
+        )
 
         user_msg = (
             f"## Specifications\n{specs}\n\n"
             f"## File to generate\nPath: `{file_path}`"
-            f"{dep_section}"
+            f"{_resolve_all_generated(generated)}"
         )
-
-        content = ""
-        try:
-            content_llm = llm.with_structured_output(SingleFileContent)
-            result_file = content_llm.invoke(
-                [
-                    SystemMessage(content=gen_prompt),
-                    HumanMessage(content=user_msg),
-                ]
-            )
-            content = result_file.content
-        except Exception:
-            try:
-                response = llm.invoke(
-                    [
-                        SystemMessage(content=gen_prompt),
-                        HumanMessage(content=user_msg),
-                    ]
-                )
-                content = response.content
-            except Exception as e2:
-                _log(
-                    "high",
-                    "ACT",
-                    f"Generation failed ({type(e2).__name__}), skipping",
-                )
-                continue
+        content = _invoke_llm(
+            llm,
+            gen_prompt,
+            user_msg,
+            schema=SingleFileContent,
+            phase="ACT",
+        )
+        if content is None:
+            continue
 
         content = _strip_markdown_fences(content)
-
         if content.strip():
             file_dict = {
                 "path": file_path,
                 "content": content,
-                "language": language,
+                "language": _detect_language(file_path),
             }
             code_files.append(file_dict)
             generated[file_path] = file_dict
-            print(f"[ACT]    ✓ {len(content)} chars")
+            print(f"[ACT]    \u2713 {len(content)} chars")
         else:
             _log("high", "ACT", f"Empty content for {file_path}, skipping")
 
@@ -637,25 +766,14 @@ def _run_lightweight(llm: BaseChatModel, scope: str, specs: str) -> list[dict]:
 def developer_node(state: AgentState) -> dict:
     """LangGraph node: run the Developer agent with AIDLC-inspired workflow.
 
-    Orchestrates a four-phase process:
-      1. Functional Design — extract domain entities, business rules, NFRs.
-      2. Plan — determine which files to generate in dependency order.
-      3. Generate — call the LLM once per file with cross-file context.
-      4. Validate — check consistency across all generated files.
-
-    On retry iterations, only files flagged by QA are regenerated; intact files
-    are carried over from the previous state unchanged.
-
-    Args:
-        state: Current LangGraph agent state containing specs, prior code files,
-               QA feedback, QA issues, and iteration count.
-
-    Returns:
-        A dict with updated ``functional_design``, ``code_files``, and
-        ``reasoning_logs`` keys.
+    Orchestrates four phases — Design, Plan, Generate, Validate — then
+    returns updated state with ``functional_design``, ``code_files``, and
+    ``reasoning_logs``.
     """
     print("\n" + "=" * 60)
-    print("👨‍💻 DEVELOPER AGENT — AIDLC-Inspired Workflow")
+    print(
+        "\U0001f468\u200d\U0001f4bb DEVELOPER AGENT \u2014 AIDLC-Inspired Workflow"
+    )
     print("=" * 60)
 
     llm = get_cortex_llm(model="deepseek-r1", temperature=0.2, max_tokens=8000)
@@ -666,10 +784,11 @@ def developer_node(state: AgentState) -> dict:
     qa_issues = state.get("qa_issues", [])
     iteration = state.get("iteration", 0)
 
-    # ── Lightweight path: function / feature scope ───────────────────────────
-
+    # ── Lightweight path: function / feature scope ───────────────
     if scope in LIGHTWEIGHT_SCOPES and iteration == 0:
-        print(f"\n⚡ Lightweight mode ({scope}) — skipping full-stack pipeline")
+        print(
+            f"\n\u26a1 Lightweight mode ({scope}) \u2014 skipping full-stack pipeline"
+        )
         code_files = _run_lightweight(llm, scope, specs)
         file_list = (
             ", ".join(f["path"] for f in code_files) if code_files else "(none)"
@@ -683,7 +802,7 @@ def developer_node(state: AgentState) -> dict:
                 {
                     "agent": "developer",
                     "phase": "plan",
-                    "content": f"Lightweight scope ({scope}) — minimal file set.",
+                    "content": f"Lightweight scope ({scope}) \u2014 minimal file set.",
                 },
                 {
                     "agent": "developer",
@@ -694,12 +813,8 @@ def developer_node(state: AgentState) -> dict:
             ],
         }
 
-    # ── Full-stack path: system / product scope ──────────────────────────────
-
-    # ── Phase 1: Functional Design ───────────────────────────────────────────
-
+    # ── Phase 1: Functional Design ───────────────────────────────
     functional_design = state.get("functional_design", "")
-
     if iteration == 0:
         functional_design = _run_functional_design(llm, specs)
         design_trace = (
@@ -710,287 +825,51 @@ def developer_node(state: AgentState) -> dict:
         design_trace = "Reusing functional design from previous iteration."
         print(f"\n[DESIGN] {design_trace}")
 
-    # ── Phase 2: File Planning ───────────────────────────────────────────────
-
-    file_plan: list[str] | None = None
-    issue_text = ""
-
-    if qa_issues and iteration > 0:
-        # Retry path: only regenerate files that QA flagged.
-        issue_text = "\n".join(
-            f"- [{iss['severity'].upper()}] {iss['file']}: {iss['description']}"
-            for iss in qa_issues
-        )
-        plan_trace = f"Iteration {iteration}: regenerating files flagged by QA."
-        print(f"\n[PLAN] {plan_trace}")
-
-        flagged_files = {
-            _sanitize_path(iss["file"])
-            for iss in qa_issues
-            if iss["file"] != "GENERAL"
-        }
-        has_general = any(iss["file"] == "GENERAL" for iss in qa_issues)
-
-        if has_general or not flagged_files:
-            file_plan = list(MANDATORY_FILES)
-        else:
-            file_plan = list(flagged_files)
-            for mf in MANDATORY_FILES:
-                if mf in flagged_files and mf not in file_plan:
-                    file_plan.append(mf)
-
-        print(f"[PLAN] Files to (re)generate: {file_plan}")
-
-    elif qa_feedback and iteration > 0:
-        # Legacy string feedback path: regenerate everything.
-        plan_trace = (
-            f"Iteration {iteration}: revising all code based on QA feedback."
-        )
-        print(f"\n[PLAN] {plan_trace}")
-        issue_text = qa_feedback
-
-    else:
-        # First pass: ask the LLM for the full file plan.
-        plan_trace = "First pass: planning files then generating code."
-        print(f"\n[PLAN] {plan_trace}")
-
-    # ── Step 2a: LLM file plan (when not pre-determined) ─────────────────────
-
-    if file_plan is None:
-        print("[PLAN] Asking LLM for file plan …")
-        try:
-            plan_llm = llm.with_structured_output(FilePlan)
-            plan_msg = f"## Specifications\n{specs}"
-            if functional_design:
-                plan_msg += f"\n\n## Functional Design\n{functional_design}"
-            if issue_text:
-                plan_msg += f"\n\n## QA Issues to address\n{issue_text}"
-
-            result: FilePlan = plan_llm.invoke(
-                [
-                    SystemMessage(content=PLAN_SYSTEM_PROMPT),
-                    HumanMessage(content=plan_msg),
-                ]
-            )
-            file_plan = [_sanitize_path(f) for f in result.files]
-        except Exception as e:
-            _log(
-                "medium",
-                "PLAN",
-                f"Structured plan failed ({type(e).__name__}), using mandatory list.",
-            )
-            file_plan = list(MANDATORY_FILES)
-
-        # Guarantee mandatory files are always included.
-        for mf in MANDATORY_FILES:
-            if not any(mf in fp for fp in file_plan):
-                file_plan.append(mf)
-
-    # Sort by architectural layer (AIDLC dependency ordering).
-    file_plan = _sort_by_layer(file_plan)
-    print(
-        f"[PLAN] File plan ({len(file_plan)} files, dependency-ordered): {file_plan}"
+    # ── Phase 2: File Planning ───────────────────────────────────
+    file_plan, plan_trace = _run_file_planning(
+        llm,
+        specs,
+        functional_design,
+        qa_issues,
+        qa_feedback,
+        iteration,
     )
 
-    # ── Phase 3: Generate each file individually ─────────────────────────────
+    # ── Phase 3: Code Generation ─────────────────────────────────
+    existing_files = {f["path"]: f for f in state.get("code_files", [])}
+    code_files, generated = _run_code_generation(
+        llm,
+        file_plan,
+        specs,
+        functional_design,
+        existing_files,
+        qa_issues,
+        qa_feedback,
+        iteration,
+    )
 
-    code_files: list[dict] = []
-    generated: dict[str, dict] = {}  # For cross-file context lookups
-    existing_files: dict[str, dict] = {
-        f["path"]: f for f in state.get("code_files", [])
-    }
-
-    # Pre-populate generated context with existing files (for retry iterations)
-    if iteration > 0 and existing_files:
-        generated.update(existing_files)
-
-    for i, file_path in enumerate(file_plan, 1):
-        file_path = _sanitize_path(file_path)
-        language = _detect_language(file_path)
-
-        print(f"\n[ACT]  Generating file {i}/{len(file_plan)}: {file_path} …")
-
-        file_hint = _get_file_hint(file_path)
-        import_hint = _build_import_hint(file_path)
-
-        # AIDLC-inspired: Cross-file context from already-generated dependencies
-        dep_context = _resolve_dependencies(file_path, generated)
-        if dep_context:
-            dep_count = dep_context.count("###")
-            print(
-                f"[ACT]    ↳ Injecting {dep_count} dependency file(s) as context"
-            )
-
-        # Collect QA feedback relevant to this specific file.
-        file_issues = ""
-        if qa_issues and iteration > 0:
-            relevant = [
-                iss
-                for iss in qa_issues
-                if iss["file"] == file_path or iss["file"] == "GENERAL"
-            ]
-            if relevant:
-                file_issues = (
-                    "\n## QA issues to fix in THIS file:\n"
-                    + "\n".join(
-                        f"- [{iss['severity'].upper()}] {iss['description']}"
-                        for iss in relevant
-                    )
-                )
-        elif qa_feedback and iteration > 0:
-            file_issues = f"\n## QA feedback (address what is relevant to this file):\n{qa_feedback}"
-
-        # Build the user message with all context layers
-        user_msg = f"## Application Specifications\n{specs}\n\n"
-        if functional_design:
-            user_msg += f"## Functional Design\n{functional_design}\n\n"
-        user_msg += (
-            f"## File to generate\nPath: `{file_path}`\n\n"
-            f"## Instructions\n{file_hint}"
-            f"{import_hint}"
-            f"{dep_context}"
-            f"{file_issues}"
+    # ── Phase 4: Self-Validation ─────────────────────────────────
+    validation_issues = _run_self_validation(llm, code_files)
+    if validation_issues:
+        _run_auto_fix(
+            llm,
+            code_files,
+            generated,
+            validation_issues,
+            specs,
+            functional_design,
         )
 
-        # Try structured output first, fall back to raw completion.
-        content = ""
-        try:
-            content_llm = llm.with_structured_output(SingleFileContent)
-            result_file = content_llm.invoke(
-                [
-                    SystemMessage(content=GENERATE_SYSTEM_PROMPT),
-                    HumanMessage(content=user_msg),
-                ]
-            )
-            content = result_file.content
-        except Exception as e:
-            _log(
-                "medium",
-                "ACT",
-                f"Structured failed ({type(e).__name__}), trying raw …",
-            )
-            try:
-                response = llm.invoke(
-                    [
-                        SystemMessage(content=GENERATE_SYSTEM_PROMPT),
-                        HumanMessage(content=user_msg),
-                    ]
-                )
-                content = response.content
-            except Exception as e2:
-                _log(
-                    "high",
-                    "ACT",
-                    f"Raw also failed ({type(e2).__name__}), skipping file.",
-                )
-                continue
-
-        content = _strip_markdown_fences(content)
-
-        if content.strip():
-            file_dict = {
-                "path": file_path,
-                "content": content,
-                "language": language,
-            }
-            code_files.append(file_dict)
-            generated[file_path] = file_dict  # Available for downstream files
-            print(f"[ACT]    ✓ {len(content)} chars")
-        else:
-            _log("high", "ACT", f"Empty content for {file_path}, skipping")
-
-    # On retry merges: preserve old files that were not regenerated.
-    if iteration > 0 and existing_files:
-        regenerated_paths = {f["path"] for f in code_files}
-        for path, old_file in existing_files.items():
-            if path not in regenerated_paths:
-                code_files.append(old_file)
-                print(f"[ACT]  Kept existing file: {path}")
-
-    # ── Phase 4: Self-Validation (AIDLC-inspired) ───────────────────────────
-
-    validation_issues = _run_self_validation(llm, code_files)
-
-    if validation_issues:
-        # Attempt one auto-fix pass for files with critical/major issues
-        critical_files = {
-            iss["file"]
-            for iss in validation_issues
-            if iss["severity"] in ("critical", "major")
-        }
-
-        if critical_files:
-            print(
-                f"\n[VALIDATE] Auto-fixing {len(critical_files)} file(s) with critical/major issues …"
-            )
-            fix_text = "\n".join(
-                f"- [{iss['severity'].upper()}] {iss['file']}: {iss['description']}"
-                for iss in validation_issues
-            )
-
-            for file_path in critical_files:
-                # Find the file in code_files
-                file_idx = next(
-                    (
-                        i
-                        for i, f in enumerate(code_files)
-                        if f["path"] == file_path
-                    ),
-                    None,
-                )
-                if file_idx is None:
-                    continue
-
-                print(f"[VALIDATE] Regenerating: {file_path} …")
-                file_hint = _get_file_hint(file_path)
-                import_hint = _build_import_hint(file_path)
-                dep_context = _resolve_dependencies(file_path, generated)
-
-                fix_msg = f"## Application Specifications\n{specs}\n\n"
-                if functional_design:
-                    fix_msg += f"## Functional Design\n{functional_design}\n\n"
-                fix_msg += (
-                    f"## File to generate\nPath: `{file_path}`\n\n"
-                    f"## Instructions\n{file_hint}"
-                    f"{import_hint}"
-                    f"{dep_context}"
-                    f"\n## Consistency issues to fix in THIS file:\n{fix_text}"
-                )
-
-                try:
-                    content_llm = llm.with_structured_output(SingleFileContent)
-                    result_file = content_llm.invoke(
-                        [
-                            SystemMessage(content=GENERATE_SYSTEM_PROMPT),
-                            HumanMessage(content=fix_msg),
-                        ]
-                    )
-                    content = _strip_markdown_fences(result_file.content)
-                    if content.strip():
-                        code_files[file_idx] = {
-                            "path": file_path,
-                            "content": content,
-                            "language": code_files[file_idx]["language"],
-                        }
-                        generated[file_path] = code_files[file_idx]
-                        print(
-                            f"[VALIDATE] ✓ Fixed {file_path} ({len(content)} chars)"
-                        )
-                except Exception as e:
-                    _log(
-                        "medium",
-                        "VALIDATE",
-                        f"Auto-fix failed for {file_path} ({type(e).__name__})",
-                    )
-
-    # ── Reason phase ─────────────────────────────────────────────────────────
-
+    # ── Reasoning trace ──────────────────────────────────────────
     file_list = (
         ", ".join(f["path"] for f in code_files) if code_files else "(none)"
     )
     reason_trace = f"Generated {len(code_files)} files: {file_list}"
     if validation_issues:
-        reason_trace += f" | Self-validation found {len(validation_issues)} issues (auto-fix attempted)"
+        reason_trace += (
+            f" | Self-validation found {len(validation_issues)} issues "
+            "(auto-fix attempted)"
+        )
     print(f"\n[REASON] {reason_trace}\n")
 
     return {
