@@ -72,6 +72,42 @@ class FilePlan(BaseModel):
     )
 
 
+class FunctionalDesign(BaseModel):
+    """Structured output from the AIDLC-inspired functional design phase.
+
+    Contains the technology-agnostic analysis of what the application does,
+    extracted before file planning and code generation.
+    """
+
+    content: str = Field(
+        description=(
+            "The full functional design analysis including domain entities, "
+            "business rules, API endpoints, component dependency map, and "
+            "NFR considerations."
+        )
+    )
+
+
+class ValidationIssue(BaseModel):
+    """A single consistency issue found during self-validation."""
+
+    file: str = Field(description="File path the issue relates to")
+    severity: str = Field(description="'critical' | 'major' | 'minor'")
+    description: str = Field(description="What is wrong and how to fix it")
+
+
+class ValidationResult(BaseModel):
+    """Structured output from the AIDLC-inspired self-validation phase."""
+
+    passed: bool = Field(
+        description="True if all consistency checks pass, False otherwise"
+    )
+    issues: list[ValidationIssue] = Field(
+        default_factory=list,
+        description="List of consistency issues found. Empty if passed=True.",
+    )
+
+
 class File(BaseModel):
     """A generic generated file (CI or CD artifact)."""
 
@@ -127,6 +163,7 @@ class AgentState(TypedDict):
     diagrams: str  # Mermaid C4 diagrams
 
     # ── Developer outputs ───────────────────────────────────────
+    functional_design: str  # AIDLC-inspired functional design analysis
     code_files: list[CodeFile]  # generated source files
 
     # ── DevOps outputs ──────────────────────────────────────────
