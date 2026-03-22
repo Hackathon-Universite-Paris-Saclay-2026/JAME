@@ -35,39 +35,6 @@ from state import AgentState
 OUTPUT_DIR = Path("output")
 PROJECT_DIR = OUTPUT_DIR / "project"
 
-_PYTHON_GITIGNORE = """\
-# Python
-__pycache__/
-*.py[cod]
-*.pyo
-*.pyd
-*.egg-info/
-dist/
-build/
-.eggs/
-
-# Virtual environments
-venv/
-.venv/
-env/
-
-# Environment & secrets
-.env
-.env.*
-!.env.example
-
-# Tools
-.mypy_cache/
-.ruff_cache/
-.pytest_cache/
-.coverage
-htmlcov/
-
-# IDE
-.idea/
-.vscode/
-"""
-
 
 def _slugify(text: str) -> str:
     """Convert free-form text into a valid GitHub repository name."""
@@ -167,72 +134,30 @@ def save_artifacts(final_state: dict) -> None:
     if code_files:
         print(f"  📦 Total     → {saved_count} files saved to output/project/")
 
-    # ── Save CI/CD ─────────────────────────────────────────────
-    cicd = final_state.get("cicd_yaml", "")
-    if cicd:
-        cicd_dir = PROJECT_DIR / ".github" / "workflows"
-        cicd_dir.mkdir(parents=True, exist_ok=True)
-        (cicd_dir / "ci.yml").write_text(cicd, encoding="utf-8")
-        print("  🔧 CI/CD     → output/project/.github/workflows/ci.yml")
+    # ── Save CI files (workflow, requirements, tooling…) ───────
+    ci_saved = 0
+    for f in final_state.get("ci_files", []):
+        path, content = f["path"], f["content"]
+        if not path or not content:
+            continue
+        dest = PROJECT_DIR / path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(content, encoding="utf-8")
+        print(f"  🔧 CI        → output/project/{path}")
+        ci_saved += 1
 
-    # ── Save Dockerfile ────────────────────────────────────────
-    dockerfile = final_state.get("dockerfile", "")
-    if dockerfile:
-        (PROJECT_DIR / "Dockerfile").write_text(dockerfile, encoding="utf-8")
-        print("  🐳 Docker    → output/project/Dockerfile")
+    # ── Save CD files (Dockerfile, compose, env…) ──────────────
+    for f in final_state.get("cd_files", []):
+        path, content = f["path"], f["content"]
+        if not path or not content:
+            continue
+        dest = PROJECT_DIR / path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(content, encoding="utf-8")
+        print(f"  🐳 CD        → output/project/{path}")
 
-    # ── Save docker-compose.yml ────────────────────────────────
-    compose = final_state.get("docker_compose_yaml", "")
-    if compose:
-        (PROJECT_DIR / "docker-compose.yml").write_text(compose, encoding="utf-8")
-        print("  🐳 Compose   → output/project/docker-compose.yml")
-
-    # ── Save .dockerignore ─────────────────────────────────────
-    dockerignore = final_state.get("dockerignore", "")
-    if dockerignore:
-        (PROJECT_DIR / ".dockerignore").write_text(dockerignore, encoding="utf-8")
-        print("  🐳 Ignore    → output/project/.dockerignore")
-
-    # ── Save requirements.txt ──────────────────────────────────
-    requirements = final_state.get("requirements", "")
-    if requirements:
-        (PROJECT_DIR / "requirements.txt").write_text(requirements, encoding="utf-8")
-        print("  📦 Deps      → output/project/requirements.txt")
-
-    # ── Save requirements-dev.txt ──────────────────────────────
-    requirements_dev = final_state.get("requirements_dev", "")
-    if requirements_dev:
-        (PROJECT_DIR / "requirements-dev.txt").write_text(requirements_dev, encoding="utf-8")
-        print("  📦 Dev deps  → output/project/requirements-dev.txt")
-
-    # ── Save pyproject.toml ────────────────────────────────────
-    pyproject_toml = final_state.get("pyproject_toml", "")
-    if pyproject_toml:
-        (PROJECT_DIR / "pyproject.toml").write_text(pyproject_toml, encoding="utf-8")
-        print("  🔧 Ruff cfg  → output/project/pyproject.toml")
-
-    # ── Save Makefile ──────────────────────────────────────────
-    makefile = final_state.get("makefile", "")
-    if makefile:
-        (PROJECT_DIR / "Makefile").write_text(makefile, encoding="utf-8")
-        print("  🛠️  Makefile  → output/project/Makefile")
-
-    # ── Save .env.example ──────────────────────────────────────
-    env_example = final_state.get("env_example", "")
-    if env_example:
-        (PROJECT_DIR / ".env.example").write_text(env_example, encoding="utf-8")
-        print("  🔑 Env       → output/project/.env.example")
-
-    # ── Save .gitignore (only when CI was generated) ───────────
-    if cicd:
-        gitignore = final_state.get("gitignore", "")
-        if gitignore:
-            (PROJECT_DIR / ".gitignore").write_text(gitignore, encoding="utf-8")
-        else:
-            (PROJECT_DIR / ".gitignore").write_text(_PYTHON_GITIGNORE, encoding="utf-8")
-        print("  📄 Gitignore → output/project/.gitignore")
-
-        # ── Initialize git repository ──────────────────────────
+    # ── Initialize git repository when CI was generated ────────
+    if ci_saved:
         _init_git_repo(PROJECT_DIR)
         print("  🗂️  Git      → output/project/ initialized with first commit")
 
@@ -328,27 +253,20 @@ def main() -> None:
     graph = build_graph()
 
     initial_state: AgentState = {
-        "user_request":        user_request,
-        "specs":               specs_from_file,
-        "diagrams":            "",
-        "code_files":          [],
-        "cicd_yaml":           "",
-        "dockerfile":          "",
-        "docker_compose_yaml": "",
-        "dockerignore":        "",
-        "requirements":        "",
-        "requirements_dev":    "",
-        "pyproject_toml":      "",
-        "makefile":            "",
-        "gitignore":           "",
-        "env_example":         "",
-        "needs_cd":            False,
-        "qa_passed":           False,
-        "qa_feedback":         "",
-        "qa_issues":           [],
-        "iteration":           0,
-        "max_iterations":      2,
-        "reasoning_logs":      [],
+        "user_request":   user_request,
+        "specs":          specs_from_file,
+        "diagrams":       "",
+        "code_files":     [],
+        "ci_files":       [],
+        "cd_files":       [],
+        "needs_ci":       False,
+        "needs_cd":       False,
+        "qa_passed":      False,
+        "qa_feedback":    "",
+        "qa_issues":      [],
+        "iteration":      0,
+        "max_iterations": 2,
+        "reasoning_logs": [],
     }
 
     final_state = graph.invoke(initial_state)

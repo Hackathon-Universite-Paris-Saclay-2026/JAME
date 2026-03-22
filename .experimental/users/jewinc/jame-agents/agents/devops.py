@@ -1,9 +1,10 @@
-"""DevOps Agent — Generates CI/CD pipelines and Docker configuration.
+"""DevOps Agent — Generates CI/CD pipelines and deployment artifacts.
 
-Responsibilities:
-  1. Decide whether the project needs CI, CD, or both.
-  2. Produce a GitHub Actions workflow (CI).
-  3. Produce a Dockerfile, docker-compose.yml, and .dockerignore (CD — services only).
+Uses a chunked per-file approach:
+
+  Step 1  —  Decide: does the project need CI and/or CD?
+  Step 2  —  Plan:   ask the LLM which files to generate from the known set.
+  Step 3  —  Generate: call the LLM once per file with targeted hints.
 """
 
 from __future__ import annotations
@@ -12,11 +13,12 @@ import os
 from pathlib import Path
 
 import yaml
-from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
-from state import AgentState
+from state import AgentState, SingleFileContent
+
 
 # ── Prompts (loaded from prompts/devops.yaml) ────────────────────────────────
 
@@ -28,11 +30,45 @@ def _load_prompts() -> dict:
         return yaml.safe_load(f)
 
 
-_PROMPTS = _load_prompts()
-_ACTIONS = _PROMPTS["actions"]  # pinned SHAs — edit prompts/devops.yaml to update
+_p    = _load_prompts()
+_hint = _p["file_hint"]
+
+_DECISION_PROMPT  = _p["decision"]["classify"]
+_CI_SYSTEM_PROMPT = _p["generate"]["ci_system"]
+_CD_SYSTEM_PROMPT = _p["generate"]["cd_system"]
+
+# Inject pinned GitHub Actions SHAs into the ci_workflow hint
+_sha = {
+    "checkout":     _p["actions"]["checkout"],
+    "setup_python": _p["actions"]["setup_python"],
+    "cache":        _p["actions"]["cache"],
+}
+_hint["ci_workflow"] = _hint["ci_workflow"].format(**_sha)
+
+FILE_HINT: dict[str, str] = _hint
 
 
-# ── Decision model ───────────────────────────────────────────────────────────
+# ── Known file sets with their generation hints ───────────────────────────────
+
+_CI_FILE_HINTS: dict[str, str] = {
+    ".github/workflows/ci.yml": FILE_HINT["ci_workflow"],
+    "pyproject.toml":           FILE_HINT["pyproject_toml"],
+    ".gitignore":               FILE_HINT["gitignore"],
+    "Makefile":                 FILE_HINT["makefile"],
+}
+
+_CD_FILE_HINTS: dict[str, str] = {
+    ".github/workflows/cd.yml": FILE_HINT["cd_workflow"],
+    "Dockerfile":               FILE_HINT["dockerfile"],
+    "docker-compose.yml":       FILE_HINT["docker_compose"],
+    ".env":                     FILE_HINT["env"],
+    ".env.example":             FILE_HINT["env_example"],
+    ".dockerignore":            FILE_HINT["dockerignore"],
+}
+
+
+# ── Structured output models ──────────────────────────────────────────────────
+
 
 class DevOpsDecision(BaseModel):
     needs_ci: bool = Field(
@@ -43,8 +79,7 @@ class DevOpsDecision(BaseModel):
     )
     needs_cd: bool = Field(
         description=(
-            "True if the project needs containerized deployment artifacts "
-            "(Dockerfile, docker-compose, .dockerignore). "
+            "True if the project needs containerized deployment artifacts. "
             "True only when the project exposes a network service: API, web app, worker, daemon. "
             "False for pure libraries, utility functions, or scripts with no server."
         )
@@ -52,46 +87,78 @@ class DevOpsDecision(BaseModel):
     reasoning: str = Field(description="One-sentence justification for this decision.")
 
 
-_DECISION_PROMPT = _PROMPTS["decision"]["classify"]
-
-_sha = dict(
-    checkout=_ACTIONS["checkout"],
-    setup_python=_ACTIONS["setup_python"],
-    cache=_ACTIONS["cache"],
-)
-_shared = _PROMPTS["act"]["shared"]
-
-_CI_PROMPT   = (_PROMPTS["act"]["ci_only"] + _shared).format(**_sha)
-_FULL_PROMPT = (_PROMPTS["act"]["full"]    + _shared).format(**_sha)
-
-
-# ── Extraction helper ────────────────────────────────────────────────────────
-
-def _extract_block(raw: str, start_marker: str, end_marker: str) -> str:
-    """Extract content between markers, stripping optional code fences."""
-    if start_marker not in raw or end_marker not in raw:
-        return ""
-    block = raw.split(start_marker)[1].split(end_marker)[0].strip()
-    for fence in ("```yaml", "```dockerfile", "```"):
-        if block.startswith(fence):
-            block = block[len(fence):]
-            break
-    if block.rstrip().endswith("```"):
-        block = block.rstrip()[:-3].rstrip()
-    return block.strip()
+class DevOpsFilePlan(BaseModel):
+    ci_files: list[str] = Field(
+        default_factory=list,
+        description=(
+            "CI file paths to generate. Choose from: "
+            + ", ".join(f"`{p}`" for p in _CI_FILE_HINTS)
+        ),
+    )
+    cd_files: list[str] = Field(
+        default_factory=list,
+        description=(
+            "CD file paths to generate. Choose from: "
+            + ", ".join(f"`{p}`" for p in _CD_FILE_HINTS)
+            + ". Leave empty when needs_cd is false."
+        ),
+    )
 
 
-# ── Decision helper ──────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+
+def _strip_fences(content: str) -> str:
+    content = content.strip()
+    # Drop any leading markdown preamble lines (bold titles, blank lines) before the fence
+    lines = content.splitlines()
+    while lines and (lines[0].strip() == "" or lines[0].strip().startswith("**")):
+        lines.pop(0)
+    content = "\n".join(lines)
+    # Strip opening fence line (e.g. ```yaml or ```)
+    if content.startswith("```"):
+        first_nl = content.find("\n")
+        if first_nl != -1:
+            content = content[first_nl + 1:]
+    # Strip closing fence
+    if content.rstrip().endswith("```"):
+        content = content.rstrip()[:-3].rstrip()
+    return content
+
+
+def _get_llm() -> ChatOpenAI:
+    api_key = os.getenv("SNOWFLAKE_API_KEY", "")
+    api_base = os.getenv("SNOWFLAKE_API_BASE", "")
+    
+    # Ensure ASCII-safe encoding for HTTP headers
+    try:
+        api_key = api_key.encode('ascii').decode('ascii')
+        api_base = api_base.encode('ascii').decode('ascii')
+    except UnicodeEncodeError as e:
+        print(f"[WARNING] Non-ASCII characters in API credentials at position {e.start}: '{e.object[e.start:e.end]}'")
+        # Remove non-ASCII characters as fallback
+        api_key = api_key.encode('ascii', errors='ignore').decode('ascii')
+        api_base = api_base.encode('ascii', errors='ignore').decode('ascii')
+    
+    return ChatOpenAI(
+        model="llama3.1-70b",
+        temperature=0.1,
+        max_tokens=4096,
+        openai_api_key=api_key,
+        openai_api_base=api_base,
+    )
+
 
 def _decide(llm: ChatOpenAI, context: str) -> DevOpsDecision:
-    """Ask the LLM whether CI and/or CD artifacts are needed."""
     try:
-        structured = llm.with_structured_output(DevOpsDecision)
-        return structured.invoke([
+        return llm.with_structured_output(DevOpsDecision).invoke([
             SystemMessage(content=_DECISION_PROMPT),
             HumanMessage(content=context),
         ])
-    except Exception:
+    except Exception as e:
+        print(f"[ERROR] _decide failed: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
         return DevOpsDecision(
             needs_ci=True,
             needs_cd=True,
@@ -99,22 +166,65 @@ def _decide(llm: ChatOpenAI, context: str) -> DevOpsDecision:
         )
 
 
-# ── Main node ────────────────────────────────────────────────────────────────
+def _plan_files(llm: ChatOpenAI, context: str, needs_cd: bool) -> DevOpsFilePlan:
+    plan_prompt = (
+        f"{context}\n\n"
+        "Select which files to generate for this project.\n"
+        f"Available CI files: {list(_CI_FILE_HINTS)}\n"
+        f"Available CD files: {list(_CD_FILE_HINTS) if needs_cd else '(not needed)'}\n"
+        "Only include files that are relevant to the project."
+    )
+    try:
+        return llm.with_structured_output(DevOpsFilePlan).invoke([
+            HumanMessage(content=plan_prompt),
+        ])
+    except Exception:
+        return DevOpsFilePlan(
+            ci_files=list(_CI_FILE_HINTS),
+            cd_files=list(_CD_FILE_HINTS) if needs_cd else [],
+        )
+
+
+def _generate_file(
+    llm: ChatOpenAI,
+    system_prompt: str,
+    context: str,
+    file_path: str,
+    hint: str,
+) -> str:
+    user_msg = (
+        f"{context}\n\n"
+        f"## File to generate\nPath: `{file_path}`\n\n"
+        f"## Instructions\n{hint}"
+    )
+    try:
+        result: SingleFileContent = llm.with_structured_output(SingleFileContent).invoke([
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_msg),
+        ])
+        return _strip_fences(result.content)
+    except Exception:
+        try:
+            response = llm.invoke([
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=user_msg),
+            ])
+            return _strip_fences(response.content)
+        except Exception:
+            return ""
+
+
+# ── Main node ─────────────────────────────────────────────────────────────────
+
 
 def devops_node(state: AgentState) -> dict:
-    """LangGraph node: run the DevOps agent."""
+    """LangGraph node: run the DevOps agent with chunked per-file generation."""
 
     print("\n" + "=" * 60)
     print("⚙️  DEVOPS AGENT — Generating CI/CD & Docker")
     print("=" * 60)
 
-    llm = ChatOpenAI(
-        model="llama3.1-70b",
-        temperature=0.1,
-        max_tokens=4096,
-        openai_api_key=os.getenv("SNOWFLAKE_API_KEY"),
-        openai_api_base=os.getenv("SNOWFLAKE_API_BASE"),
-    )
+    llm = _get_llm()
 
     specs = state.get("specs", "")
     code_files = state.get("code_files", [])
@@ -122,13 +232,12 @@ def devops_node(state: AgentState) -> dict:
         "\n".join(f"- {f['path']} ({f['language']})" for f in code_files)
         or "(none yet)"
     )
-
     context = (
         f"## Application Specifications\n{specs}\n\n"
         f"## Generated Source Files\n{file_list}"
     )
 
-    # ── Plan phase: decide CI vs CI+CD ──────────────────────────────────────
+    # ── Plan phase: decide CI/CD scope ────────────────────────────────────────
     print("\n[PLAN] Deciding CI/CD scope …")
     decision = _decide(llm, context)
     plan_trace = f"CI={decision.needs_ci}, CD={decision.needs_cd}. {decision.reasoning}"
@@ -137,11 +246,10 @@ def devops_node(state: AgentState) -> dict:
     if not decision.needs_ci:
         print("[SKIP] No CI/CD artifacts needed for this project type.\n")
         return {
-            "cicd_yaml":           "",
-            "dockerfile":          "",
-            "docker_compose_yaml": "",
-            "dockerignore":        "",
-            "needs_cd":            False,
+            "ci_files": [],
+            "cd_files": [],
+            "needs_ci": False,
+            "needs_cd": False,
             "reasoning_logs": [
                 {"agent": "devops", "phase": "plan",   "content": plan_trace},
                 {"agent": "devops", "phase": "act",    "content": "Skipped — no CI/CD required."},
@@ -149,62 +257,61 @@ def devops_node(state: AgentState) -> dict:
             ],
         }
 
-    # ── Act phase ────────────────────────────────────────────────────────────
-    system_prompt = _FULL_PROMPT if decision.needs_cd else _CI_PROMPT
-    mode = "CI + CD" if decision.needs_cd else "CI only"
-    print(f"[ACT]  Calling LLM ({mode}) …")
+    # ── Plan phase: select files ───────────────────────────────────────────────
+    print("[PLAN] Selecting files to generate …")
+    file_plan = _plan_files(llm, context, decision.needs_cd)
 
-    response = llm.invoke([
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=context),
-    ])
-    raw = response.content
+    if ".github/workflows/ci.yml" not in file_plan.ci_files:
+        file_plan.ci_files.insert(0, ".github/workflows/ci.yml")
 
-    cicd_yaml        = _extract_block(raw, "===CICD_START===",            "===CICD_END===")
-    dockerfile       = _extract_block(raw, "===DOCKERFILE_START===",      "===DOCKERFILE_END===")      if decision.needs_cd else ""
-    docker_compose   = _extract_block(raw, "===COMPOSE_START===",         "===COMPOSE_END===")         if decision.needs_cd else ""
-    dockerignore     = _extract_block(raw, "===DOCKERIGNORE_START===",    "===DOCKERIGNORE_END===")    if decision.needs_cd else ""
-    requirements     = _extract_block(raw, "===REQUIREMENTS_START===",    "===REQUIREMENTS_END===")
-    requirements_dev = _extract_block(raw, "===REQUIREMENTS_DEV_START===","===REQUIREMENTS_DEV_END===")
-    pyproject_toml   = _extract_block(raw, "===PYPROJECT_START===",       "===PYPROJECT_END===")
-    makefile         = _extract_block(raw, "===MAKEFILE_START===",        "===MAKEFILE_END===")
-    gitignore        = _extract_block(raw, "===GITIGNORE_START===",       "===GITIGNORE_END===")
-    env_example      = _extract_block(raw, "===ENV_EXAMPLE_START===",     "===ENV_EXAMPLE_END===")
+    print(f"[PLAN] CI files ({len(file_plan.ci_files)}): {file_plan.ci_files}")
+    print(f"[PLAN] CD files ({len(file_plan.cd_files)}): {file_plan.cd_files}")
 
-    # ── Reason phase ─────────────────────────────────────────────────────────
-    parts = [f"CI/CD YAML: {len(cicd_yaml)} chars"]
+    # ── Act phase: generate each CI file ──────────────────────────────────────
+    ci_files: list[dict] = []
+    for i, path in enumerate(file_plan.ci_files, 1):
+        hint = _CI_FILE_HINTS.get(path)
+        if hint is None:
+            print(f"[ACT]  Unknown CI file '{path}', skipping.")
+            continue
+        print(f"[ACT]  CI {i}/{len(file_plan.ci_files)}: {path} …")
+        content = _generate_file(llm, _CI_SYSTEM_PROMPT, context, path, hint)
+        if content.strip():
+            ci_files.append({"path": path, "content": content})
+            print(f"         ✓ {len(content)} chars")
+        else:
+            print("         ✗ Empty content, skipping")
+
+    # ── Act phase: generate each CD file ──────────────────────────────────────
+    cd_files: list[dict] = []
     if decision.needs_cd:
-        parts += [
-            f"Dockerfile: {len(dockerfile)} chars",
-            f"docker-compose: {len(docker_compose)} chars",
-            f".dockerignore: {len(dockerignore)} chars",
-        ]
-    parts += [
-        f"requirements.txt: {len(requirements)} chars",
-        f"requirements-dev.txt: {len(requirements_dev)} chars",
-        f"pyproject.toml: {len(pyproject_toml)} chars",
-        f"Makefile: {len(makefile)} chars",
-        f".gitignore: {len(gitignore)} chars",
-        f".env.example: {len(env_example)} chars",
-    ]
-    reason_trace = ", ".join(parts) + "."
-    print(f"[REASON] {reason_trace}\n")
+        for i, path in enumerate(file_plan.cd_files, 1):
+            hint = _CD_FILE_HINTS.get(path)
+            if hint is None:
+                print(f"[ACT]  Unknown CD file '{path}', let agent decide content for now.")
+                hint = "(No hint available)"
+            print(f"[ACT]  CD {i}/{len(file_plan.cd_files)}: {path} …")
+            content = _generate_file(llm, _CD_SYSTEM_PROMPT, context, path, hint)
+            if content.strip():
+                cd_files.append({"path": path, "content": content})
+                print(f"         ✓ {len(content)} chars")
+            else:
+                print("         ✗ Empty content, skipping")
+
+    # ── Reason phase ──────────────────────────────────────────────────────────
+    ci_summary = ", ".join(f["path"] for f in ci_files) or "(none)"
+    cd_summary = ", ".join(f["path"] for f in cd_files) or "(none)"
+    reason_trace = f"CI: {ci_summary} | CD: {cd_summary}"
+    print(f"\n[REASON] {reason_trace}\n")
 
     return {
-        "cicd_yaml":           cicd_yaml,
-        "dockerfile":          dockerfile,
-        "docker_compose_yaml": docker_compose,
-        "dockerignore":        dockerignore,
-        "requirements":        requirements,
-        "requirements_dev":    requirements_dev,
-        "pyproject_toml":      pyproject_toml,
-        "makefile":            makefile,
-        "gitignore":           gitignore,
-        "env_example":         env_example,
-        "needs_cd":            decision.needs_cd,
+        "ci_files": ci_files,
+        "cd_files": cd_files,
+        "needs_ci": decision.needs_ci,
+        "needs_cd": decision.needs_cd,
         "reasoning_logs": [
             {"agent": "devops", "phase": "plan",   "content": plan_trace},
-            {"agent": "devops", "phase": "act",    "content": f"Generated {mode} artifacts."},
+            {"agent": "devops", "phase": "act",    "content": f"Generated {len(ci_files)} CI + {len(cd_files)} CD files."},
             {"agent": "devops", "phase": "reason", "content": reason_trace},
         ],
     }
