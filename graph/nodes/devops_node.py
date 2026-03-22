@@ -9,6 +9,7 @@ Uses the same chunked per-file approach as the developer node:
 
 from __future__ import annotations
 
+from cancel_token import raise_if_cancelled
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
@@ -245,6 +246,7 @@ def devops_node(state: AgentState) -> dict:
         A dict updating ``ci_files``, ``cd_files``, ``needs_ci``, ``needs_cd``,
         and ``reasoning_logs``.
     """
+    raise_if_cancelled()
     print("\n" + "=" * 60)
     print("⚙️  DEVOPS AGENT — Generating CI/CD & Docker")
     print("=" * 60)
