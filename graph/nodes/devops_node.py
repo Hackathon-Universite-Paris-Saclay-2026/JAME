@@ -9,6 +9,8 @@ Uses the same chunked per-file approach as the developer node:
 
 from __future__ import annotations
 
+from functools import partial
+
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
@@ -22,6 +24,7 @@ from graph.prompts.devops_prompts import (
 )
 from graph.state import AgentState, SingleFileContent
 from integrations.cortex import get_cortex_llm
+from utils.node import run_parallel
 
 
 # ── Known file sets (path → FILE_HINT key) ────────────────────────────────────
@@ -183,6 +186,33 @@ def _plan_files(
         )
 
 
+def _collect_file_tasks(
+    llm: BaseChatModel,
+    context: str,
+    paths: list[str],
+    hint_map: dict[str, str],
+    system_prompt: str,
+    label: str,
+) -> tuple[list, list[tuple[str, str]]]:
+    """Build parallel task list for a set of DevOps files.
+
+    Returns a ``(tasks, meta)`` pair where *tasks* are zero-argument callables
+    ready for ``run_parallel`` and *meta* is a matching list of ``(label, path)``
+    tuples for result collection.
+    """
+    tasks = []
+    meta: list[tuple[str, str]] = []
+    for path in paths:
+        hint = hint_map.get(path) or (
+            f"Generate the complete, production-ready content for: {path}"
+        )
+        tasks.append(
+            partial(_generate_file, llm, system_prompt, context, path, hint)
+        )
+        meta.append((label, path))
+    return tasks, meta
+
+
 def _generate_file(
     llm: BaseChatModel,
     system_prompt: str,
@@ -310,38 +340,39 @@ def devops_node(state: AgentState) -> dict:
     print(f"[PLAN] CI files  ({len(file_plan.ci_files)}): {file_plan.ci_files}")
     print(f"[PLAN] CD files  ({len(file_plan.cd_files)}): {file_plan.cd_files}")
 
-    # ── Act phase: generate each CI file ──────────────────────────────────────
-    ci_files: list[dict] = []
-    for i, path in enumerate(file_plan.ci_files, 1):
-        hint = _CI_FILE_HINTS.get(path)
-        if hint is None:
-            print(f"[ACT]  Unknown CI file '{path}', skipping.")
-            continue
-        print(f"[ACT]  CI {i}/{len(file_plan.ci_files)}: {path} …")
-        content = _generate_file(llm, CI_SYSTEM_PROMPT, context, path, hint)
-        if content.strip():
-            ci_files.append({"path": path, "content": content})
-            print(f"         ✓ {len(content)} chars")
-        else:
-            print("         ✗ Empty content, skipping")
+    # ── Act phase: generate all CI + CD files in parallel ─────────────────────
+    # CI and CD files are fully independent — build a flat task list and run
+    # everything at once (CI first, then CD for predictable log ordering).
+    ci_tasks, ci_meta = _collect_file_tasks(
+        llm, context, file_plan.ci_files, _CI_FILE_HINTS, CI_SYSTEM_PROMPT, "CI"
+    )
+    cd_tasks, cd_meta = (
+        _collect_file_tasks(
+            llm,
+            context,
+            file_plan.cd_files,
+            _CD_FILE_HINTS,
+            CD_SYSTEM_PROMPT,
+            "CD",
+        )
+        if decision.needs_cd
+        else ([], [])
+    )
 
-    # ── Act phase: generate each CD file ──────────────────────────────────────
+    tasks = ci_tasks + cd_tasks
+    task_meta = ci_meta + cd_meta
+    print(f"[ACT]  Generating {len(tasks)} file(s) in parallel …")
+    contents: list[str] = run_parallel(tasks)
+
+    ci_files: list[dict] = []
     cd_files: list[dict] = []
-    if decision.needs_cd:
-        for i, path in enumerate(file_plan.cd_files, 1):
-            hint = _CD_FILE_HINTS.get(path)
-            if hint is None:
-                print(
-                    f"[ACT]  Unknown CD file '{path}', letting agent decide content."
-                )
-                hint = f"Generate the complete, production-ready content for: {path}"
-            print(f"[ACT]  CD {i}/{len(file_plan.cd_files)}: {path} …")
-            content = _generate_file(llm, CD_SYSTEM_PROMPT, context, path, hint)
-            if content.strip():
-                cd_files.append({"path": path, "content": content})
-                print(f"         ✓ {len(content)} chars")
-            else:
-                print("         ✗ Empty content, skipping")
+    for (label, path), content in zip(task_meta, contents, strict=True):
+        if content.strip():
+            entry = {"path": path, "content": content}
+            (ci_files if label == "CI" else cd_files).append(entry)
+            print(f"[ACT]  {label} ✓ {path} ({len(content)} chars)")
+        else:
+            print(f"[ACT]  {label} ✗ {path} — empty content, skipping")
 
     # ── Reason phase ──────────────────────────────────────────────────────────
     ci_summary = ", ".join(f["path"] for f in ci_files) or "(none)"
