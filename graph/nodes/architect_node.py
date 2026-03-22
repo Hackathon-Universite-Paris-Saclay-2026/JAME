@@ -373,6 +373,7 @@ def architect_node(state: AgentState) -> dict:
     )
 
     return {
+        "scope": scope,
         "specs": specs,
         "diagrams": diagrams,
         "reasoning_logs": reasoning_logs,
