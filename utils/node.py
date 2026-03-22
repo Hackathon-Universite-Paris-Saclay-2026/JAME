@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 import re
@@ -10,6 +12,37 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage
 
 from integrations.github import auto_commit, init_repo
+
+
+# ---------------------------------------------------------------------------
+# Parallel execution
+# ---------------------------------------------------------------------------
+
+_PARALLEL_MAX_WORKERS = 6
+
+
+def run_parallel(
+    tasks: list[Callable[[], object]],
+    *,
+    max_workers: int = _PARALLEL_MAX_WORKERS,
+) -> list:
+    """Execute zero-argument callables in parallel, returning results in submission order.
+
+    Args:
+        tasks: No-argument callables to run concurrently (use ``functools.partial``
+               to bind arguments beforehand).
+        max_workers: Thread pool size cap. Automatically capped to ``len(tasks)``.
+
+    Returns:
+        List of return values in the same order as *tasks*.
+    """
+    if not tasks:
+        return []
+    with ThreadPoolExecutor(
+        max_workers=min(max_workers, len(tasks))
+    ) as executor:
+        futures = [executor.submit(task) for task in tasks]
+        return [f.result() for f in futures]
 
 
 # ---------------------------------------------------------------------------
