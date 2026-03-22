@@ -159,6 +159,7 @@ class AgentState(TypedDict):
     user_request: str
 
     # ── Architect outputs ──────────────────────────────────
+    scope: str  # "function" | "feature" | "system" | "product"
     specs: str  # structured specification (modules, routes, models)
     diagrams: str  # Mermaid C4 diagrams
 
