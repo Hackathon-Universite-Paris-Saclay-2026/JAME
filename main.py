@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from api.app import app as app  # re-export for uvicorn main:app
 from config import settings
 
 
