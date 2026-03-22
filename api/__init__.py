@@ -1,1 +1,1 @@
-"""Route handlers package — HTTP API for code generation and SSE streaming."""
+"""JAME API package — WebSocket + REST endpoints for the orchestrator."""
