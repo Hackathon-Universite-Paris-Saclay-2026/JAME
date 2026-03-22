@@ -9,11 +9,11 @@ Uses the same chunked per-file approach as the developer node:
 
 from __future__ import annotations
 
-from cancel_token import raise_if_cancelled
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
+from cancel_token import raise_if_cancelled
 from graph.prompts.devops_prompts import (
     CD_SYSTEM_PROMPT,
     CI_SYSTEM_PROMPT,

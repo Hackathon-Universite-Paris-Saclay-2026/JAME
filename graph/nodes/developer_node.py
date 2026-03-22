@@ -19,11 +19,10 @@ from __future__ import annotations
 
 from pathlib import PurePosixPath
 
-from cancel_token import raise_if_cancelled
-
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from cancel_token import raise_if_cancelled
 from graph.prompts.developer_prompts import (
     COMPONENT_HINT,
     FILE_CONTEXT,

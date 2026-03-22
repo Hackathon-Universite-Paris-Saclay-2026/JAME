@@ -16,11 +16,10 @@ from __future__ import annotations
 
 import sys
 
-from cancel_token import raise_if_cancelled
-
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from cancel_token import raise_if_cancelled
 from graph.prompts.architect_prompts import (
     DESIGN_INITIAL_PROMPT,
     DESIGN_LIGHTWEIGHT_PROMPT,
@@ -33,7 +32,7 @@ from graph.prompts.architect_prompts import (
 )
 from graph.state import AgentState
 from integrations.cortex import get_cortex_llm
-from utils.node import compress, maybe_compress, parse_json_safe, strip_thinking
+from utils.node import maybe_compress, parse_json_safe, strip_thinking
 
 
 MAX_INTERROGATION_ROUNDS = 3
@@ -62,7 +61,9 @@ def _parse_output(raw: str) -> tuple[str, str]:
     specs = diagrams = ""
     if "===SPECS_START===" in raw and "===SPECS_END===" in raw:
         specs = (
-            raw.split("===SPECS_START===")[1].split("===SPECS_END===")[0].strip()
+            raw.split("===SPECS_START===")[1]
+            .split("===SPECS_END===")[0]
+            .strip()
         )
     else:
         specs = raw

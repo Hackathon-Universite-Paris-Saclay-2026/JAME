@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 import json
+from pathlib import Path
 import sys
 import traceback
-import uuid
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
+import uuid
 
 from cancel_token import CancelToken, RunCancelledError, set_current_token
 from graph.graph import build_graph
@@ -26,12 +26,19 @@ class OrchestratorService:
     def __init__(self, output_root: Path) -> None:
         self.store = InMemoryRunStore()
         self.output_root = output_root
+        self._run_tasks: set[asyncio.Task[None]] = set()
+
+    def _track_task(self, task: asyncio.Task[None]) -> None:
+        """Keep a strong reference to background tasks until they finish."""
+        self._run_tasks.add(task)
+        task.add_done_callback(self._run_tasks.discard)
 
     async def create_run(self, request: RunCreateRequest) -> str:
         """Create a new run and launch the pipeline as a background task."""
         run_id = str(uuid.uuid4())
         self.store.create_run(run_id, request)
-        asyncio.create_task(self._run_pipeline(run_id, request))
+        task = asyncio.create_task(self._run_pipeline(run_id, request))
+        self._track_task(task)
         return run_id
 
     def cancel_run(self, run_id: str) -> bool:
@@ -53,7 +60,7 @@ class OrchestratorService:
             agent=agent,
             phase=phase,
             message=message,
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
             payload=payload or {},
         )
         await self.store.publish(evt)
@@ -68,10 +75,19 @@ class OrchestratorService:
                 merged[key] = value
         return merged  # type: ignore[return-value]
 
-    async def _run_pipeline(self, run_id: str, request: RunCreateRequest) -> None:
+    @staticmethod
+    def _raise_pipeline_error(error: Exception) -> None:
+        """Raise worker exceptions in the pipeline loop context."""
+        raise error
+
+    async def _run_pipeline(
+        self, run_id: str, request: RunCreateRequest
+    ) -> None:
         """Run the LangGraph pipeline in a worker thread, streaming events as each node completes."""
         self.store.update_status(run_id, RunStatus.RUNNING)
-        await self._emit(run_id, "run_started", "Starting JAME orchestration pipeline...")
+        await self._emit(
+            run_id, "run_started", "Starting JAME orchestration pipeline..."
+        )
 
         token = CancelToken()
         # chunk_queue is created first so it can be registered for immediate cancel
@@ -107,19 +123,27 @@ class OrchestratorService:
 
         def _run_graph_sync() -> None:
             """Run LangGraph synchronously in a worker thread, streaming chunks via queue."""
-            set_current_token(token)  # bind so nodes can call raise_if_cancelled()
+            set_current_token(
+                token
+            )  # bind so nodes can call raise_if_cancelled()
             graph = build_graph()
             try:
                 for chunk in graph.stream(initial_state, stream_mode="updates"):
-                    loop.call_soon_threadsafe(chunk_queue.put_nowait, ("chunk", chunk))
+                    loop.call_soon_threadsafe(
+                        chunk_queue.put_nowait, ("chunk", chunk)
+                    )
             except RunCancelledError:
                 loop.call_soon_threadsafe(
                     chunk_queue.put_nowait, ("cancelled", None)
                 )
             except Exception as exc:
-                loop.call_soon_threadsafe(chunk_queue.put_nowait, ("error", exc))
+                loop.call_soon_threadsafe(
+                    chunk_queue.put_nowait, ("error", exc)
+                )
             else:
-                loop.call_soon_threadsafe(chunk_queue.put_nowait, ("done", None))
+                loop.call_soon_threadsafe(
+                    chunk_queue.put_nowait, ("done", None)
+                )
 
         try:
             graph_task = asyncio.create_task(asyncio.to_thread(_run_graph_sync))
@@ -135,7 +159,7 @@ class OrchestratorService:
                     return
 
                 if kind == "error":
-                    raise payload  # type: ignore[misc]
+                    self._raise_pipeline_error(payload)
 
                 if kind == "done":
                     break
@@ -174,7 +198,9 @@ class OrchestratorService:
                         )
 
                     # After developer: write code files immediately and notify UI
-                    if node_name == "developer" and node_update.get("code_files"):
+                    if node_name == "developer" and node_update.get(
+                        "code_files"
+                    ):
                         dev_files = node_update["code_files"]
                         project_dir_early = (
                             run_output_dir / "output" / "project"
@@ -184,7 +210,11 @@ class OrchestratorService:
 
                         for cf in dev_files:
                             p = cf["path"] if isinstance(cf, dict) else cf.path
-                            c = cf["content"] if isinstance(cf, dict) else cf.content
+                            c = (
+                                cf["content"]
+                                if isinstance(cf, dict)
+                                else cf.content
+                            )
                             lang = (
                                 cf.get("language", "text")
                                 if isinstance(cf, dict)
@@ -201,7 +231,11 @@ class OrchestratorService:
                                 message=f"Generated: {p}",
                                 agent="developer",
                                 phase="CONSTRUCTION",
-                                payload={"path": p, "content": c, "language": lang},
+                                payload={
+                                    "path": p,
+                                    "content": c,
+                                    "language": lang,
+                                },
                             )
 
                         await self._emit(
@@ -224,7 +258,11 @@ class OrchestratorService:
                             (node_update.get("cd_files", []), "CD"),
                         ]:
                             for cf in file_list:
-                                p = cf["path"] if isinstance(cf, dict) else cf.path
+                                p = (
+                                    cf["path"]
+                                    if isinstance(cf, dict)
+                                    else cf.path
+                                )
                                 c = (
                                     cf["content"]
                                     if isinstance(cf, dict)
@@ -258,7 +296,9 @@ class OrchestratorService:
                     else code_file.path
                 )
                 if rel_path:
-                    generated_files.append(str((project_dir / rel_path).resolve()))
+                    generated_files.append(
+                        str((project_dir / rel_path).resolve())
+                    )
 
             result = {
                 "qa_passed": final_state.get("qa_passed", False),
@@ -285,13 +325,13 @@ class OrchestratorService:
             )
 
         except Exception as exc:
-            error_msg = f"{str(exc)}\n{traceback.format_exc()}"
+            error_msg = f"{exc!s}\n{traceback.format_exc()}"
             print(f"[ERROR] Run {run_id} failed: {error_msg}", file=sys.stderr)
             self.store.set_error(run_id, str(exc))
             await self._emit(
                 run_id,
                 "run_failed",
-                f"Build failed: {str(exc)}",
+                f"Build failed: {exc!s}",
                 payload={"error": error_msg},
             )
         finally:
