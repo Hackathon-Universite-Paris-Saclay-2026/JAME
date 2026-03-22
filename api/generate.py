@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from graph.graph import build_graph
 from graph.state import AgentState
+from utils.node import save_artifacts
 
 
 router = APIRouter(prefix="/api", tags=["generation"])
@@ -106,8 +107,10 @@ async def _run_graph(
         "specs": "",
         "diagrams": "",
         "code_files": [],
-        "cicd_yaml": "",
-        "dockerfile": "",
+        "ci_files": [],
+        "cd_files": [],
+        "needs_ci": False,
+        "needs_cd": False,
         "qa_passed": False,
         "qa_feedback": "",
         "qa_issues": [],
@@ -119,6 +122,7 @@ async def _run_graph(
     try:
         graph = build_graph()
         final_state = await asyncio.to_thread(graph.invoke, initial_state)
+        await asyncio.to_thread(save_artifacts, final_state, f"output/{job_id}")
         _jobs[job_id]["result"] = final_state
         _jobs[job_id]["status"] = "done"
         # Persist reasoning traces so the SSE generator can flush remaining events.
