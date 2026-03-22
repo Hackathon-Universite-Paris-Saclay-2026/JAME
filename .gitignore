@@ -79,3 +79,6 @@ Thumbs.db
 # Project specific
 instance/
 .webassets-cache
+
+# JAME specific
+output/
