@@ -2,17 +2,21 @@
 
 Flow:
   1. Classify scope (function / feature / system / product).
-  2. Interrogation - up to 3 rounds of Q&A for system/product scope.
+  2. Interrogation - up to 3 rounds of Q&A for system/product scope (CLI mode only).
   3. Design - full C4 (system/product) or lightweight spec (function/feature).
   4. Self-critique - automated internal consistency check.
-  5. User validation loop - up to MAX_DESIGN_ITERATIONS revisions.
+  5. User validation loop - up to MAX_DESIGN_ITERATIONS revisions (CLI mode only).
   6. Memory compression when context exceeds threshold.
+
+In API mode (no TTY), interrogation and user validation are skipped so the
+server never blocks waiting for stdin.
 """
 
 from __future__ import annotations
 
-import json
-import re
+import sys
+
+from cancel_token import raise_if_cancelled
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -29,6 +33,7 @@ from graph.prompts.architect_prompts import (
 )
 from graph.state import AgentState
 from integrations.cortex import get_cortex_llm
+from utils.node import compress, maybe_compress, parse_json_safe, strip_thinking
 
 
 MAX_INTERROGATION_ROUNDS = 3
@@ -36,28 +41,12 @@ MAX_DESIGN_ITERATIONS = 3
 COMPRESS_THRESHOLD = 5000
 
 
+def _is_interactive() -> bool:
+    """Return True when running in a terminal (CLI mode), False in API/server mode."""
+    return sys.stdin.isatty()
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
-
-
-def _strip_thinking(text: str) -> tuple[str, str]:
-    if "<think>" in text and "</think>" in text:
-        thinking = text.split("<think>")[1].split("</think>")[0].strip()
-        content = text.split("</think>", 1)[-1].strip()
-        return thinking, content
-    return "", text
-
-
-def _parse_json(raw: str) -> dict:
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", raw, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group())
-            except json.JSONDecodeError:
-                pass
-    return {}
 
 
 def _build_context(user_request: str, clarifications: list[dict]) -> str:
@@ -69,28 +58,11 @@ def _build_context(user_request: str, clarifications: list[dict]) -> str:
     return "\n\n".join(lines)
 
 
-def _compress(llm: BaseChatModel, context: str) -> str:
-    print("[MEMORY] Context too large — compressing …")
-    resp = llm.invoke(
-        [HumanMessage(content=MEMORY_COMPRESS_PROMPT.format(context=context))]
-    )
-    _, compressed = _strip_thinking(resp.content)
-    print("[MEMORY] Compressed.\n")
-    return compressed
-
-
-def _maybe_compress(llm: BaseChatModel, context: str, memory: str) -> str:
-    full = (memory + "\n\n" + context).strip()
-    return _compress(llm, full) if len(full) > COMPRESS_THRESHOLD else full
-
-
 def _parse_output(raw: str) -> tuple[str, str]:
     specs = diagrams = ""
     if "===SPECS_START===" in raw and "===SPECS_END===" in raw:
         specs = (
-            raw.split("===SPECS_START===")[1]
-            .split("===SPECS_END===")[0]
-            .strip()
+            raw.split("===SPECS_START===")[1].split("===SPECS_END===")[0].strip()
         )
     else:
         specs = raw
@@ -115,8 +87,8 @@ def _classify_scope(llm: BaseChatModel, user_request: str) -> tuple[str, bool]:
             HumanMessage(content=user_request),
         ]
     )
-    _, raw = _strip_thinking(resp.content)
-    data = _parse_json(raw)
+    _, raw = strip_thinking(resp.content)
+    data = parse_json_safe(raw)
     scope = data.get("scope", "system")
     needs_interrogation = data.get(
         "needs_interrogation", scope in ("system", "product")
@@ -128,7 +100,10 @@ def _classify_scope(llm: BaseChatModel, user_request: str) -> tuple[str, bool]:
 def _interrogate(
     llm: BaseChatModel, user_request: str, max_rounds: int
 ) -> list[dict]:
-    """Run up to max_rounds of Q&A with the user to clarify ambiguities."""
+    """Run up to max_rounds of Q&A with the user to clarify ambiguities.
+
+    Only called in interactive (CLI) mode — skipped in API mode.
+    """
     clarifications: list[dict] = []
     for round_num in range(1, max_rounds + 1):
         previous_qa = (
@@ -152,8 +127,8 @@ def _interrogate(
                 ),
             ]
         )
-        _, raw = _strip_thinking(resp.content)
-        data = _parse_json(raw)
+        _, raw = strip_thinking(resp.content)
+        data = parse_json_safe(raw)
         questions: list[str] = data.get("questions", [])
         done: bool = data.get("done", False)
 
@@ -189,8 +164,8 @@ def _self_critique(llm: BaseChatModel, specs: str, diagrams: str) -> list[str]:
             ),
         ]
     )
-    _, raw = _strip_thinking(resp.content)
-    data = _parse_json(raw)
+    _, raw = strip_thinking(resp.content)
+    data = parse_json_safe(raw)
     issues: list[str] = data.get("issues", [])
     if issues:
         print(f"[REASON] Self-critique found {len(issues)} issue(s): {issues}")
@@ -202,7 +177,10 @@ def _self_critique(llm: BaseChatModel, specs: str, diagrams: str) -> list[str]:
 def _validate_with_user(
     llm: BaseChatModel, specs: str, diagrams: str
 ) -> tuple[bool, str | None]:
-    """Present the design summary to the user and collect approval or feedback."""
+    """Present the design summary to the user and collect approval or feedback.
+
+    Only called in interactive (CLI) mode — skipped in API mode.
+    """
     print("\n" + "=" * 60)
     print("[VALIDATE] Presenting design for approval …")
     print("=" * 60)
@@ -212,7 +190,7 @@ def _validate_with_user(
             HumanMessage(content=f"## Diagrams\n{diagrams[:1000]}"),
         ]
     )
-    _, review = _strip_thinking(resp.content)
+    _, review = strip_thinking(resp.content)
     print("\n" + review)
     answer = input("\n    ➜ ").strip()
     print()
@@ -235,10 +213,12 @@ def architect_node(state: AgentState) -> dict:
     Returns:
         A dict updating ``specs``, ``diagrams``, and ``reasoning_logs``.
     """
+    raise_if_cancelled()
     print("\n" + "=" * 60)
     print("🏛️  ARCHITECT AGENT — Full Design Flow")
     print("=" * 60)
 
+    interactive = _is_interactive()
     llm = get_cortex_llm(model="deepseek-r1", temperature=0.3, max_tokens=4096)
     user_request = state["user_request"]
     memory = ""
@@ -263,9 +243,9 @@ def architect_node(state: AgentState) -> dict:
         }
     )
 
-    # ── Step 2: Interrogation ────────────────────────────────────────────────
+    # ── Step 2: Interrogation (CLI mode only) ────────────────────────────────
     clarifications: list[dict] = []
-    if needs_interrogation:
+    if needs_interrogation and interactive:
         clarifications = _interrogate(
             llm, user_request, MAX_INTERROGATION_ROUNDS
         )
@@ -276,10 +256,18 @@ def architect_node(state: AgentState) -> dict:
                 "content": f"{len(clarifications)} clarification(s) collected.",
             }
         )
+    elif needs_interrogation:
+        reasoning_logs.append(
+            {
+                "agent": "architect",
+                "phase": "interrogation",
+                "content": "API mode — skipping interactive interrogation.",
+            }
+        )
 
     # ── Step 3: Build context + compress if needed ───────────────────────────
     context = _build_context(user_request, clarifications)
-    memory = _maybe_compress(llm, context, memory)
+    memory = maybe_compress(llm, context, memory, MEMORY_COMPRESS_PROMPT)
     memory_section = (
         f"## Memory / previous context\n{memory}\n\n" if memory else ""
     )
@@ -319,7 +307,7 @@ def architect_node(state: AgentState) -> dict:
             ]
 
         d_resp = llm.invoke(messages)
-        thinking, raw = _strip_thinking(d_resp.content)
+        thinking, raw = strip_thinking(d_resp.content)
         if thinking:
             print(
                 f"[THINKING — design {iteration}]\n"
@@ -333,6 +321,7 @@ def architect_node(state: AgentState) -> dict:
             {
                 "agent": "architect",
                 "phase": "act",
+                "thinking": thinking,
                 "content": f"Iteration {iteration}: {len(specs)}c specs, {len(diagrams)}c diagrams.",
             }
         )
@@ -354,12 +343,27 @@ def architect_node(state: AgentState) -> dict:
             approved = True
             break
 
+        # API mode: auto-approve after self-critique passes
+        if not interactive:
+            approved = True
+            reasoning_logs.append(
+                {
+                    "agent": "architect",
+                    "phase": "validate",
+                    "content": "API mode — auto-approved design.",
+                }
+            )
+            break
+
         approved, feedback = _validate_with_user(llm, specs, diagrams)
         if approved:
             break
 
-        memory = _maybe_compress(
-            llm, f"Iteration {iteration} feedback: {feedback}", memory
+        memory = maybe_compress(
+            llm,
+            f"Iteration {iteration} feedback: {feedback}",
+            memory,
+            MEMORY_COMPRESS_PROMPT,
         )
         memory_section = f"## Memory / previous context\n{memory}\n\n"
 

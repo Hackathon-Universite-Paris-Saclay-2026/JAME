@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from pathlib import PurePosixPath
 
+from cancel_token import raise_if_cancelled
+
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -770,6 +772,7 @@ def developer_node(state: AgentState) -> dict:
     returns updated state with ``functional_design``, ``code_files``, and
     ``reasoning_logs``.
     """
+    raise_if_cancelled()
     print("\n" + "=" * 60)
     print(
         "\U0001f468\u200d\U0001f4bb DEVELOPER AGENT \u2014 AIDLC-Inspired Workflow"
