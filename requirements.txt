@@ -8,6 +8,7 @@ ruff==0.14.13   # pinned to avoid breaking CI
 # --- Web framework ---
 fastapi
 uvicorn[standard]
+websockets
 
 # --- LangChain / LangGraph ---
 langgraph
