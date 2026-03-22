@@ -47,7 +47,7 @@ def get_cortex_llm(
     return ChatOpenAI(
         model=model,
         temperature=temperature,
-        max_tokens=max_tokens,
+        max_completion_tokens=max_tokens,
         openai_api_key=api_key,
         openai_api_base=api_base,
     )
