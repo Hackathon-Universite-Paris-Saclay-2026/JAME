@@ -26,7 +26,11 @@ install-deps:
 ## Start the JAME API server
 run:
 	@echo "Starting JAME API server on http://localhost:8000 ..."
+<<<<<<< HEAD
 	@source venv/bin/activate && uvicorn api.app:app --host 0.0.0.0 --port 8000 --reload --reload-dir api --reload-dir graph --reload-dir utils --reload-dir prompts --reload-dir integrations
+=======
+	@source venv/bin/activate && uvicorn api.app:app --host 0.0.0.0 --port 8000 --reload
+>>>>>>> 9507153 (fix: correct fast api running and import)
 
 ## Run the test suite
 test:
