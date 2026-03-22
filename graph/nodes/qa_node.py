@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import json
 
+from cancel_token import raise_if_cancelled
+
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage
 
@@ -338,6 +340,7 @@ def qa_node(state: AgentState) -> dict:
         A dict updating ``qa_passed``, ``qa_feedback``, ``qa_issues``,
         ``iteration``, and ``reasoning_logs``.
     """
+    raise_if_cancelled()
     print("\n" + "=" * 60)
     print("🔍  QUALITY ENGINEER — AI-DLC CONSTRUCTION / Build and Test")
     print("=" * 60)
