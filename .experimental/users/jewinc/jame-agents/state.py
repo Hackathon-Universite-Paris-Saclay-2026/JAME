@@ -86,6 +86,18 @@ class GeneratedCode(BaseModel):
     )
 
 
+class File(BaseModel):
+    """A generic generated file (CI or CD artifact)."""
+
+    path: str = Field(description="Relative file path, e.g. '.github/workflows/ci.yml'")
+    content: str = Field(description="Complete file content")
+
+    @field_validator("path")
+    @classmethod
+    def clean_path(cls, v: str) -> str:
+        return _sanitize_path(v)
+
+
 class AgentState(TypedDict):
     """Central state passed between all agents in the graph."""
 
@@ -100,16 +112,9 @@ class AgentState(TypedDict):
     code_files: list[CodeFile]  # generated source files
 
     # ── DevOps outputs ──────────────────────────────────────────
-    cicd_yaml: str              # GitHub Actions workflow
-    dockerfile: str             # Dockerfile
-    docker_compose_yaml: str    # docker-compose.yml for local deployment
-    dockerignore: str           # .dockerignore content
-    requirements: str           # requirements.txt (runtime dependencies)
-    requirements_dev: str       # requirements-dev.txt (dev dependencies)
-    pyproject_toml: str         # pyproject.toml (ruff config + project metadata)
-    makefile: str               # Makefile (local dev targets)
-    gitignore: str              # .gitignore
-    env_example: str            # .env.example (connection strings with placeholder values)
+    ci_files: list[File]        # CI artifacts (workflow, requirements, tooling, gitignore)
+    cd_files: list[File]        # CD artifacts (Dockerfile, compose, env, dockerignore)
+    needs_ci: bool              # True if CI artifacts were generated
     needs_cd: bool              # True if CD artifacts were generated
 
     # ── QA outputs ──────────────────────────────────────────────
