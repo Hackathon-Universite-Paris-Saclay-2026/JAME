@@ -72,6 +72,21 @@ class FilePlan(BaseModel):
     )
 
 
+class File(BaseModel):
+    """A generic generated file (CI or CD artifact)."""
+
+    path: str = Field(
+        description="Relative file path, e.g. '.github/workflows/ci.yml'"
+    )
+    content: str = Field(description="Complete file content")
+
+    @field_validator("path")
+    @classmethod
+    def clean_path(cls, v: str) -> str:
+        """Sanitize the path on construction."""
+        return _sanitize_path(v)
+
+
 class QAIssue(BaseModel):
     """A single actionable QA issue."""
 
@@ -115,8 +130,14 @@ class AgentState(TypedDict):
     code_files: list[CodeFile]  # generated source files
 
     # ── DevOps outputs ──────────────────────────────────────────
-    cicd_yaml: str  # GitHub Actions workflow YAML
-    dockerfile: str  # Dockerfile content
+    ci_files: list[
+        File
+    ]  # CI artifacts (.github/workflows, Makefile, requirements*, pyproject.toml, .gitignore)
+    cd_files: list[
+        File
+    ]  # CD artifacts (Dockerfile, docker-compose.yml, .dockerignore, .env.example)
+    needs_ci: bool  # whether CI artifacts were generated
+    needs_cd: bool  # whether CD artifacts were generated
 
     # ── QA outputs ──────────────────────────────────────────────
     qa_passed: bool
