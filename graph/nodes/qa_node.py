@@ -24,6 +24,7 @@ Security rules enforced (AI-DLC security baseline):
 
 from __future__ import annotations
 
+from functools import partial
 import json
 
 from langchain_core.language_models import BaseChatModel
@@ -31,7 +32,6 @@ from langchain_core.messages import HumanMessage
 
 from cancel_token import raise_if_cancelled
 from graph.prompts.qa_prompts import (
-    COMPRESS_PROMPT,
     CROSS_FILE_PROMPT,
     FULL_REWRITE_PROMPT,
     PATCH_INSTRUCTIONS_PROMPT,
@@ -42,7 +42,7 @@ from graph.prompts.qa_prompts import (
 )
 from graph.state import AgentState, CodeFile, QAIssue
 from integrations.cortex import get_cortex_llm
-from utils.node import maybe_compress, parse_json_safe, strip_thinking
+from utils.node import parse_json_safe, run_parallel, strip_thinking
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -348,7 +348,14 @@ def qa_node(state: AgentState) -> dict:
     raw_files = state.get("code_files", [])
     iteration = state.get("iteration", 0)
     max_iterations = state.get("max_iterations", 3)
-    memory = ""
+    # NOTE: `memory` / `maybe_compress` was originally scaffolded here to build
+    # a running compressed summary of per-file analysis and fix instructions,
+    # intended for injection into the cross-file check and verdict prompts.
+    # It was never wired up (memory was accumulated but never passed to any LLM
+    # call), and parallelizing REVIEW + FIX makes in-flight accumulation
+    # impossible anyway. The structured `per_file_results` and `re_review_results`
+    # already give those calls sufficient context — implement as a follow-up if
+    # verdict quality degrades on large codebases (10+ files).
     reasoning_logs = []
 
     code_files: list[CodeFile] = [_to_code_file(f) for f in raw_files]
@@ -393,25 +400,25 @@ def qa_node(state: AgentState) -> dict:
         }
     )
 
-    # ── [REVIEW] Critical files first ────────────────────────────────────────
+    # ── [REVIEW] All files in parallel (critical-first order preserved) ───────
     ordered_files = sorted(
         code_files,
         key=lambda f: {"critical": 0, "important": 1, "standard": 2}.get(
             priority_map.get(f.path, "standard"), 2
         ),
     )
-    per_file_results: list[dict] = []
-    for code_file in ordered_files:
-        result = _analyse_file(
-            llm, specs, code_file, priority_map.get(code_file.path, "standard")
-        )
-        per_file_results.append(result)
-        memory = maybe_compress(
-            llm,
-            f"Reviewed {code_file.path}: {len(result.get('issues', []))} issue(s).",
-            memory,
-            COMPRESS_PROMPT,
-        )
+    per_file_results: list[dict] = run_parallel(
+        [
+            partial(
+                _analyse_file,
+                llm,
+                specs,
+                f,
+                priority_map.get(f.path, "standard"),
+            )
+            for f in ordered_files
+        ]
+    )
 
     reasoning_logs.append(
         {
@@ -466,27 +473,35 @@ def qa_node(state: AgentState) -> dict:
             "reasoning_logs": reasoning_logs,
         }
 
-    # ── [FIX] ────────────────────────────────────────────────────────────────
-    fix_feedback_parts: list[str] = []
+    # ── [FIX] All files with issues in parallel ───────────────────────────────
+    files_to_fix: list[tuple[dict, CodeFile]] = []
     for result in per_file_results:
-        file_issues = result.get("issues", [])
-        if not file_issues:
+        if not result.get("issues"):
             continue
         code_file = next(
             (f for f in code_files if f.path == result["file"]), None
         )
-        if code_file is None:
-            continue
-        instructions = _generate_fix_instructions(
-            llm, specs, code_file, file_issues
+        if code_file is not None:
+            files_to_fix.append((result, code_file))
+
+    instructions_list: list[str] = run_parallel(
+        [
+            partial(
+                _generate_fix_instructions,
+                llm,
+                specs,
+                code_file,
+                result["issues"],
+            )
+            for result, code_file in files_to_fix
+        ]
+    )
+    fix_feedback_parts = [
+        f"### {code_file.path}\n{instructions}"
+        for (_, code_file), instructions in zip(
+            files_to_fix, instructions_list, strict=True
         )
-        fix_feedback_parts.append(f"### {code_file.path}\n{instructions}")
-        memory = maybe_compress(
-            llm,
-            f"Fix instructions for {code_file.path}.",
-            memory,
-            COMPRESS_PROMPT,
-        )
+    ]
 
     cross_issues = cross_file_result.get("issues", [])
     if cross_issues:
@@ -530,9 +545,9 @@ def qa_node(state: AgentState) -> dict:
         "[AI-DLC] Max iterations reached — re-reviewing and issuing verdict.\n"
     )
     re_review_results: list[dict] = []
+    files_to_rereview: list[tuple[dict, CodeFile]] = []
     for result in per_file_results:
-        original_issues = result.get("issues", [])
-        if not original_issues:
+        if not result.get("issues"):
             re_review_results.append(
                 {
                     "file": result["file"],
@@ -545,11 +560,15 @@ def qa_node(state: AgentState) -> dict:
         code_file = next(
             (f for f in code_files if f.path == result["file"]), None
         )
-        if code_file is None:
-            continue
-        re_review_results.append(
-            _re_review_file(llm, code_file, original_issues)
-        )
+        if code_file is not None:
+            files_to_rereview.append((result, code_file))
+
+    re_review_results += run_parallel(
+        [
+            partial(_re_review_file, llm, code_file, result["issues"])
+            for result, code_file in files_to_rereview
+        ]
+    )
 
     # ── [VERDICT] ─────────────────────────────────────────────────────────────
     passed, verdict_text = _issue_verdict(llm, re_review_results)
