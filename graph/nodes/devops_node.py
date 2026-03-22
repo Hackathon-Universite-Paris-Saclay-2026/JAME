@@ -45,6 +45,30 @@ _CD_FILE_HINTS: dict[str, str] = {
     ".dockerignore": FILE_HINT["dockerignore"],
 }
 
+# ── Per-file token budgets ─────────────────────────────────────────────────────
+# Small config files waste budget at 4096; workflow YAMLs genuinely need it.
+
+_FILE_MAX_TOKENS: dict[str, int] = {
+    # Tiny — list of patterns, no logic
+    ".gitignore": 512,
+    ".dockerignore": 512,
+    ".env": 512,
+    ".env.example": 512,
+    # Medium — structured config, some verbosity
+    "Makefile": 1024,
+    "pyproject.toml": 1024,
+    "Dockerfile": 2048,
+    "docker-compose.yml": 2048,
+    # Large — full CI/CD pipeline YAML with multiple jobs and steps
+    ".github/workflows/ci.yml": 4096,
+    ".github/workflows/cd.yml": 4096,
+}
+
+
+def _get_max_tokens(file_path: str) -> int:
+    """Return the token budget for a given DevOps file, defaulting to 2048."""
+    return _FILE_MAX_TOKENS.get(file_path, 2048)
+
 
 # ── Structured output models ──────────────────────────────────────────────────
 
@@ -206,8 +230,13 @@ def _collect_file_tasks(
         hint = hint_map.get(path) or (
             f"Generate the complete, production-ready content for: {path}"
         )
+        # Bind a file-specific token budget — avoids wasting the full 4096
+        # budget on tiny files like .gitignore or .env.
+        bound_llm = llm.bind(max_tokens=_get_max_tokens(path))
         tasks.append(
-            partial(_generate_file, llm, system_prompt, context, path, hint)
+            partial(
+                _generate_file, bound_llm, system_prompt, context, path, hint
+            )
         )
         meta.append((label, path))
     return tasks, meta
