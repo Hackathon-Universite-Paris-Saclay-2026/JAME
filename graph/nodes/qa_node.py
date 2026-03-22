@@ -26,11 +26,10 @@ from __future__ import annotations
 
 import json
 
-from cancel_token import raise_if_cancelled
-
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage
 
+from cancel_token import raise_if_cancelled
 from graph.prompts.qa_prompts import (
     COMPRESS_PROMPT,
     CROSS_FILE_PROMPT,

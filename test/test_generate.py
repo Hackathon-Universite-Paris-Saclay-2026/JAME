@@ -27,7 +27,10 @@ class TestPostRuns:
 
     def test_returns_202_with_run_id(self) -> None:
         """A valid request returns HTTP 202 and a run_id string."""
-        with patch("api.service.OrchestratorService._run_pipeline", new_callable=AsyncMock):
+        with patch(
+            "api.service.OrchestratorService._run_pipeline",
+            new_callable=AsyncMock,
+        ):
             response = client.post(
                 "/runs",
                 json={"user_request": "A simple todo list API"},
@@ -77,7 +80,10 @@ class TestGetRun:
 
     def test_known_run_returns_status(self) -> None:
         """A known run_id returns status and metadata."""
-        with patch("api.service.OrchestratorService._run_pipeline", new_callable=AsyncMock):
+        with patch(
+            "api.service.OrchestratorService._run_pipeline",
+            new_callable=AsyncMock,
+        ):
             create_resp = client.post(
                 "/runs",
                 json={"user_request": "A simple API"},
@@ -89,7 +95,13 @@ class TestGetRun:
         assert status_resp.status_code == 200
         body = status_resp.json()
         assert body["run_id"] == run_id
-        assert body["status"] in ("pending", "running", "succeeded", "failed", "cancelled")
+        assert body["status"] in (
+            "pending",
+            "running",
+            "succeeded",
+            "failed",
+            "cancelled",
+        )
 
 
 class TestCancelRun:
