@@ -1,3 +1,0 @@
-pytest>=8
-ruff>=0.9
-pip-audit>=2.8
