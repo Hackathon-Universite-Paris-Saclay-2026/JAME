@@ -210,6 +210,7 @@ class OrchestratorService:
 
         return _emit_sync
 
+
     async def _emit(
         self,
         run_id: str,
@@ -270,6 +271,9 @@ class OrchestratorService:
 
         run_output_dir = (self.output_root / run_id).resolve()
         run_output_dir.mkdir(parents=True, exist_ok=True)
+
+        loop = asyncio.get_running_loop()
+        clarify_fn = self._make_clarify_fn(run_id, loop)
 
         initial_state: AgentState = {
             "user_request": request.user_request,
