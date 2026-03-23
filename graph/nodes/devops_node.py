@@ -21,16 +21,18 @@ from graph.prompts.devops_prompts import (
     CI_SYSTEM_PROMPT,
     DECISION_PROMPT,
     FILE_HINT,
+    MEMORY_COMPRESS_PROMPT,
 )
 from graph.state import AgentState, SingleFileContent
 from integrations.cortex import get_cortex_llm
-from utils.node import run_parallel
+from utils.node import maybe_compress, run_parallel
 
 
 # ── Known file sets (path → FILE_HINT key) ────────────────────────────────────
 
 _CI_FILE_HINTS: dict[str, str] = {
     ".github/workflows/ci.yml": FILE_HINT["ci_workflow"],
+    "requirements-dev.txt": FILE_HINT["requirements_dev"],
     "pyproject.toml": FILE_HINT["pyproject_toml"],
     ".gitignore": FILE_HINT["gitignore"],
     "Makefile": FILE_HINT["makefile"],
@@ -54,6 +56,7 @@ _FILE_MAX_TOKENS: dict[str, int] = {
     ".dockerignore": 512,
     ".env": 512,
     ".env.example": 512,
+    "requirements-dev.txt": 256,
     # Medium — structured config, some verbosity
     "Makefile": 1024,
     "pyproject.toml": 1024,
@@ -279,7 +282,8 @@ def _generate_file(
             ]
         )
         return _strip_fences(result.content)
-    except Exception:
+    except Exception as exc:
+        print(f"[ACT]  structured output failed for {file_path}: {exc}")
         try:
             response = llm.invoke(
                 [
@@ -288,7 +292,8 @@ def _generate_file(
                 ]
             )
             return _strip_fences(response.content)
-        except Exception:
+        except Exception as exc2:
+            print(f"[ACT]  raw completion failed for {file_path}: {exc2}")
             return ""
 
 
@@ -322,8 +327,18 @@ def devops_node(state: AgentState) -> dict:
         )
         or "(none yet)"
     )
+    # Full context for decision and planning (needs complete specs for accuracy).
     context = (
         f"## Application Specifications\n{specs}\n\n"
+        f"## Generated Source Files\n{file_list}"
+    )
+    # Compressed specs for file generation — avoids hitting Cortex input limits
+    # on large projects while preserving the DevOps-relevant information.
+    compressed_specs = maybe_compress(
+        llm, specs, "", MEMORY_COMPRESS_PROMPT, threshold=5000
+    )
+    generation_context = (
+        f"## Application Specifications\n{compressed_specs}\n\n"
         f"## Generated Source Files\n{file_list}"
     )
 
@@ -362,9 +377,14 @@ def devops_node(state: AgentState) -> dict:
     print("[PLAN] Selecting files to generate …")
     file_plan = _plan_files(llm, context, decision.needs_cd)
 
-    # Ensure .github/workflows/ci.yml is always present when CI is needed
+    # Ensure mandatory workflow files are always present
     if ".github/workflows/ci.yml" not in file_plan.ci_files:
         file_plan.ci_files.insert(0, ".github/workflows/ci.yml")
+    if (
+        decision.needs_cd
+        and ".github/workflows/cd.yml" not in file_plan.cd_files
+    ):
+        file_plan.cd_files.insert(0, ".github/workflows/cd.yml")
 
     print(f"[PLAN] CI files  ({len(file_plan.ci_files)}): {file_plan.ci_files}")
     print(f"[PLAN] CD files  ({len(file_plan.cd_files)}): {file_plan.cd_files}")
@@ -373,12 +393,17 @@ def devops_node(state: AgentState) -> dict:
     # CI and CD files are fully independent — build a flat task list and run
     # everything at once (CI first, then CD for predictable log ordering).
     ci_tasks, ci_meta = _collect_file_tasks(
-        llm, context, file_plan.ci_files, _CI_FILE_HINTS, CI_SYSTEM_PROMPT, "CI"
+        llm,
+        generation_context,
+        file_plan.ci_files,
+        _CI_FILE_HINTS,
+        CI_SYSTEM_PROMPT,
+        "CI",
     )
     cd_tasks, cd_meta = (
         _collect_file_tasks(
             llm,
-            context,
+            generation_context,
             file_plan.cd_files,
             _CD_FILE_HINTS,
             CD_SYSTEM_PROMPT,
