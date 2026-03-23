@@ -5,6 +5,7 @@ import * as vscode from "vscode";
 
 type StartRunRequest = {
   userRequest: string;
+  mode?: string;
 };
 
 export class JameViewProvider implements vscode.WebviewViewProvider {
@@ -14,8 +15,59 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
   private currentRunId?: string;
   /** Actual backend URL after port resolution (may differ from configured URL). */
   private resolvedBackendUrl?: string;
+  /** Proposed file contents keyed by relative path, for inline diff editor. */
+  private proposedFiles: Map<string, string> = new Map();
 
   constructor(private readonly extensionUri: vscode.Uri) {}
+
+  /** Returns proposed content for the jame-proposed:// URI scheme. */
+  public getProposedContent(filePath: string): string {
+    return this.proposedFiles.get(filePath) ?? "";
+  }
+
+  /** Open a VS Code diff editor between workspace file and proposed content. */
+  private async openProposedChange(filePath: string, content: string): Promise<void> {
+    this.proposedFiles.set(filePath, content);
+
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!workspaceRoot) {
+      // No workspace — just store in memory, nothing to write
+      return;
+    }
+
+    const destPath = path.join(workspaceRoot, filePath);
+
+    // Capture the previous content (if any) for the diff "original" side
+    const hadExisting = fs.existsSync(destPath);
+    const previousContent = hadExisting ? fs.readFileSync(destPath, "utf8") : null;
+
+    // Write immediately so the file is on disk (not lost if VS Code crashes)
+    fs.mkdirSync(path.dirname(destPath), { recursive: true });
+    fs.writeFileSync(destPath, content, "utf8");
+
+    // Open a diff editor showing what changed (previous ↔ new, or empty ↔ new)
+    const proposedUri = vscode.Uri.parse(`jame-proposed:${filePath}`);
+    const label = `${path.basename(filePath)} (JAME generated)`;
+
+    if (hadExisting && previousContent !== null) {
+      // Store the old content under a "previous" key so the diff LHS shows it
+      this.proposedFiles.set(`__prev__${filePath}`, previousContent);
+      await vscode.commands.executeCommand(
+        "vscode.diff",
+        vscode.Uri.parse(`jame-proposed:__prev__${filePath}`),
+        vscode.Uri.file(destPath),
+        label
+      );
+    } else {
+      // New file — diff against empty to show what was added
+      await vscode.commands.executeCommand(
+        "vscode.diff",
+        vscode.Uri.parse("jame-proposed:__empty__"),
+        vscode.Uri.file(destPath),
+        label
+      );
+    }
+  }
 
   public resolveWebviewView(
     webviewView: vscode.WebviewView,
@@ -30,26 +82,34 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
 
     webviewView.webview.html = this.getHtml();
 
-    // Eagerly start the backend as a background task so it's ready on first Send
+    // Eagerly start the backend as a background task so it's ready on first Send.
+    // We defer slightly so the webview JS has time to initialise its message listener.
     {
       const backendUrl = vscode.workspace
         .getConfiguration()
         .get<string>("jameWorkflow.backendUrl", "http://localhost:8000");
-      this.ensureBackendReady(backendUrl).catch(() => {
-        // Silent — will retry when user sends a request
-      });
+      setTimeout(() => {
+        this.ensureBackendReady(backendUrl).catch((err) => {
+          webviewView.webview.postMessage({
+            command: "system",
+            message: "Backend startup failed: " + (err instanceof Error ? err.message : String(err)),
+          });
+        });
+      }, 200);
     }
 
     webviewView.webview.onDidReceiveMessage(async (message: unknown) => {
       const msg = message as {
         command?: string;
         userRequest?: string;
+        mode?: string;
         files?: string[];
         projectDir?: string;
         filePath?: string;
         fileContent?: string;
         runId?: string;
         destDir?: string;
+        answer?: string;
       };
 
       if (msg.command === "openGeneratedFiles") {
@@ -77,6 +137,55 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
         return;
       }
 
+      if (msg.command === "openProposedChange") {
+        await this.openProposedChange(msg.filePath!, msg.fileContent!);
+        return;
+      }
+
+      if (msg.command === "submitClarification") {
+        const backendUrlForClarify = this.resolvedBackendUrl ?? vscode.workspace
+          .getConfiguration()
+          .get<string>("jameWorkflow.backendUrl", "http://localhost:8000");
+        const fetchFn2 = (globalThis as { fetch?: (input: string, init?: unknown) => Promise<any> }).fetch;
+        if (fetchFn2 && msg.runId) {
+          try {
+            await fetchFn2(`${backendUrlForClarify}/runs/${msg.runId}/clarify`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ answer: msg.answer }),
+            });
+          } catch { /* ignore */ }
+        }
+        return;
+      }
+
+      if (msg.command === "acceptFile") {
+        // File already on disk — just close its diff tab
+        await this.closeJameProposedTabs(msg.filePath);
+        return;
+      }
+
+      if (msg.command === "discardFile") {
+        // Delete file from workspace and close its diff tab
+        const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (workspaceRoot && msg.filePath) {
+          const dest = path.join(workspaceRoot, msg.filePath);
+          if (fs.existsSync(dest)) { fs.unlinkSync(dest); }
+        }
+        await this.closeJameProposedTabs(msg.filePath);
+        return;
+      }
+
+      if (msg.command === "acceptAll") {
+        await this.acceptAllProposed();
+        return;
+      }
+
+      if (msg.command === "discardAll") {
+        await this.discardAllProposed();
+        return;
+      }
+
       if (msg.command !== "startRun") {
         return;
       }
@@ -98,7 +207,7 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
         const resp = await fetchFn(`${effectiveUrl}/runs`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ user_request: payload.userRequest, max_iterations: 3 }),
+          body: JSON.stringify({ user_request: payload.userRequest, max_iterations: 3, mode: payload.mode ?? "senior" }),
         });
 
         if (!resp.ok) {
@@ -283,8 +392,62 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private async acceptAllProposed(): Promise<void> {
+    // Files are already written to workspace on generation — just close diff tabs
+    const count = this.proposedFiles.size;
+    this.proposedFiles.clear();
+    await this.closeJameProposedTabs();
+    if (this.view) {
+      this.view.webview.postMessage({ command: "allAccepted" });
+    }
+    vscode.window.showInformationMessage(`Kept ${count} generated file(s).`);
+  }
+
+  private async discardAllProposed(): Promise<void> {
+    // Delete all written files from workspace then close diff tabs
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    let deleted = 0;
+    if (workspaceRoot) {
+      for (const filePath of this.proposedFiles.keys()) {
+        if (filePath.startsWith("__")) continue; // skip __prev__ / __empty__ keys
+        const dest = path.join(workspaceRoot, filePath);
+        if (fs.existsSync(dest)) { fs.unlinkSync(dest); deleted++; }
+      }
+    }
+    this.proposedFiles.clear();
+    await this.closeJameProposedTabs();
+    if (this.view) {
+      this.view.webview.postMessage({ command: "allDiscarded" });
+    }
+    vscode.window.showInformationMessage(`Discarded ${deleted} generated file(s).`);
+  }
+
+  private async closeJameProposedTabs(filterPath?: string): Promise<void> {
+    for (const group of vscode.window.tabGroups.all) {
+      for (const tab of group.tabs) {
+        const input = tab.input as { original?: vscode.Uri; modified?: vscode.Uri } | undefined;
+        const isJame =
+          input?.modified?.scheme === "jame-proposed" ||
+          input?.original?.scheme === "jame-proposed";
+        if (!isJame) continue;
+        if (filterPath) {
+          // Only close tabs related to this specific file
+          const modPath = input?.modified?.path?.replace(/^\//, "") ?? "";
+          const origPath = input?.original?.path?.replace(/^\//, "") ?? "";
+          const fp = filterPath.replace(/^\//, "");
+          if (!modPath.includes(fp) && !origPath.includes(fp)) continue;
+        }
+        await vscode.window.tabGroups.close(tab);
+      }
+    }
+  }
+
   private async ensureBackendReady(backendUrl: string): Promise<void> {
     if (await this.isBackendHealthy(backendUrl)) {
+      if (!this.resolvedBackendUrl) {
+        this.resolvedBackendUrl = backendUrl;
+        this.view?.webview.postMessage({ command: "backendUrlResolved", backendUrl });
+      }
       return;
     }
 
