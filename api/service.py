@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 import json
 from pathlib import Path
 import sys
+import threading
 import traceback
 from typing import Any
 import uuid
@@ -44,6 +45,10 @@ class OrchestratorService:
     def cancel_run(self, run_id: str) -> bool:
         """Request cancellation of a running pipeline."""
         return self.store.cancel_run(run_id)
+
+    def approve_run(self, run_id: str) -> bool:
+        """Approve the pending node so the pipeline resumes."""
+        return self.store.approve_run(run_id)
 
     async def _emit(
         self,
@@ -85,14 +90,21 @@ class OrchestratorService:
     ) -> None:
         """Run the LangGraph pipeline in a worker thread, streaming events as each node completes."""
         self.store.update_status(run_id, RunStatus.RUNNING)
+        mode = request.mode
         await self._emit(
-            run_id, "run_started", "Starting JAME orchestration pipeline..."
+            run_id,
+            "run_started",
+            f"Starting JAME orchestration pipeline (mode={mode})...",
+            payload={"mode": mode},
         )
 
         token = CancelToken()
-        # chunk_queue is created first so it can be registered for immediate cancel
         chunk_queue: asyncio.Queue = asyncio.Queue()
         self.store.register_token(run_id, token, chunk_queue)
+
+        # Approval event — blocks the worker thread when graph is interrupted
+        approval_event = threading.Event()
+        self.store.register_approval_event(run_id, approval_event)
 
         initial_state: AgentState = {
             "user_request": request.user_request,
@@ -101,6 +113,7 @@ class OrchestratorService:
             "diagrams": "",
             "functional_design": "",
             "code_files": [],
+            "tutor_files": [],
             "ci_files": [],
             "cd_files": [],
             "needs_ci": False,
@@ -108,6 +121,7 @@ class OrchestratorService:
             "qa_passed": False,
             "qa_feedback": "",
             "qa_issues": [],
+            "mode": mode,
             "iteration": 0,
             "max_iterations": request.max_iterations,
             "reasoning_logs": [],
@@ -118,32 +132,75 @@ class OrchestratorService:
 
         final_state: AgentState = initial_state
 
-        # chunk_queue already created above (registered with store for instant cancel)
         loop = asyncio.get_running_loop()
 
         def _run_graph_sync() -> None:
-            """Run LangGraph synchronously in a worker thread, streaming chunks via queue."""
-            set_current_token(
-                token
-            )  # bind so nodes can call raise_if_cancelled()
-            graph = build_graph()
-            try:
-                for chunk in graph.stream(initial_state, stream_mode="updates"):
+            """Run LangGraph synchronously in a worker thread.
+
+            For Expert/Senior modes the graph is compiled with ``interrupt_before``.
+            After each stream segment the worker checks whether the graph is
+            paused (``state.next`` is non-empty).  If so it emits an
+            ``("interrupt", next_node)`` message and blocks on
+            ``approval_event`` until the user approves via the API.
+            """
+            set_current_token(token)
+            graph = build_graph(mode=mode)
+
+            # Config with thread_id enables the checkpointer to persist state
+            # across interrupt/resume cycles.
+            config = {"configurable": {"thread_id": run_id}}
+
+            input_state: AgentState | None = initial_state
+
+            while True:
+                try:
+                    for chunk in graph.stream(
+                        input_state, config, stream_mode="updates"
+                    ):
+                        loop.call_soon_threadsafe(
+                            chunk_queue.put_nowait, ("chunk", chunk)
+                        )
+                except RunCancelledError:
                     loop.call_soon_threadsafe(
-                        chunk_queue.put_nowait, ("chunk", chunk)
+                        chunk_queue.put_nowait, ("cancelled", None)
                     )
-            except RunCancelledError:
-                loop.call_soon_threadsafe(
-                    chunk_queue.put_nowait, ("cancelled", None)
-                )
-            except Exception as exc:
-                loop.call_soon_threadsafe(
-                    chunk_queue.put_nowait, ("error", exc)
-                )
-            else:
+                    return
+                except Exception as exc:
+                    loop.call_soon_threadsafe(
+                        chunk_queue.put_nowait, ("error", exc)
+                    )
+                    return
+
+                # ── Check if graph is paused at an interrupt ─────────
+                if mode in ("expert", "senior"):
+                    state_snapshot = graph.get_state(config)
+                    if state_snapshot.next:
+                        next_node = state_snapshot.next[0]
+                        loop.call_soon_threadsafe(
+                            chunk_queue.put_nowait,
+                            ("interrupt", next_node),
+                        )
+
+                        # Block worker thread until user approves (or cancels)
+                        approval_event.wait()
+                        approval_event.clear()
+
+                        # Check cancellation after waking up
+                        if token.is_cancelled():
+                            loop.call_soon_threadsafe(
+                                chunk_queue.put_nowait, ("cancelled", None)
+                            )
+                            return
+
+                        # Resume graph from checkpoint (pass None as input)
+                        input_state = None
+                        continue
+
+                # No interrupt or junior mode — graph is done
                 loop.call_soon_threadsafe(
                     chunk_queue.put_nowait, ("done", None)
                 )
+                return
 
         try:
             graph_task = asyncio.create_task(asyncio.to_thread(_run_graph_sync))
@@ -164,8 +221,41 @@ class OrchestratorService:
                 if kind == "done":
                     break
 
+                if kind == "interrupt":
+                    # payload is the name of the next node awaiting approval
+                    next_node = payload
+                    self.store.update_status(
+                        run_id, RunStatus.WAITING_FOR_APPROVAL
+                    )
+                    await self._emit(
+                        run_id=run_id,
+                        event="approval_required",
+                        message=(
+                            f"Approval required: '{next_node}' is about to execute. "
+                            f"POST /runs/{run_id}/approve to continue."
+                        ),
+                        agent=next_node,
+                        phase="interrupt",
+                        payload={
+                            "next_node": next_node,
+                            "mode": mode,
+                            "reasoning_logs": final_state.get(
+                                "reasoning_logs", []
+                            ),
+                        },
+                    )
+                    continue
+
                 # kind == "chunk" — a node has completed
                 chunk = payload
+                # When resuming from an interrupt the status flips back to RUNNING
+                if (
+                    self.store.get_run(run_id)
+                    and self.store.get_run(run_id).status  # type: ignore[union-attr]
+                    == RunStatus.WAITING_FOR_APPROVAL
+                ):
+                    self.store.update_status(run_id, RunStatus.RUNNING)
+
                 for node_name, node_update in chunk.items():
                     if not isinstance(node_update, dict):
                         continue
@@ -251,6 +341,33 @@ class OrchestratorService:
                             },
                         )
 
+                    # After tutor (Junior mode): emit exercise files
+                    if node_name == "tutor" and node_update.get("tutor_files"):
+                        for cf in node_update["tutor_files"]:
+                            p = cf["path"] if isinstance(cf, dict) else cf.path
+                            c = (
+                                cf["content"]
+                                if isinstance(cf, dict)
+                                else cf.content
+                            )
+                            lang = (
+                                cf.get("language", "python")
+                                if isinstance(cf, dict)
+                                else cf.language
+                            )
+                            await self._emit(
+                                run_id=run_id,
+                                event="tutor_file_generated",
+                                message=f"Exercise: {p}",
+                                agent="tutor",
+                                phase="CONSTRUCTION",
+                                payload={
+                                    "path": p,
+                                    "content": c,
+                                    "language": lang,
+                                },
+                            )
+
                     # After devops: emit CI/CD file events
                     if node_name == "devops":
                         for file_list, phase_label in [
@@ -307,6 +424,7 @@ class OrchestratorService:
                 "output_dir": str((run_output_dir / "output").resolve()),
                 "project_dir": str(project_dir),
                 "generated_files": generated_files,
+                "mode": mode,
                 "state": json.loads(json.dumps(final_state, default=str)),
             }
 
@@ -321,6 +439,7 @@ class OrchestratorService:
                     "project_dir": result["project_dir"],
                     "generated_files": result["generated_files"],
                     "qa_passed": result["qa_passed"],
+                    "mode": mode,
                 },
             )
 

@@ -86,12 +86,34 @@ async def cancel_run(run_id: str) -> dict[str, str]:
     return {"status": "cancellation_requested"}
 
 
+@app.post("/runs/{run_id}/approve")
+async def approve_run(run_id: str) -> dict[str, str]:
+    """Approve the next pending node so the pipeline resumes.
+
+    Only valid when the run is in ``waiting_for_approval`` status
+    (Expert/Senior modes paused at an interrupt point).
+    """
+    record = service.store.get_run(run_id)
+    if record is None:
+        raise HTTPException(
+            status_code=404, detail=f"Run '{run_id}' not found."
+        )
+    approved = service.approve_run(run_id)
+    if not approved:
+        raise HTTPException(
+            status_code=409,
+            detail="Run is not waiting for approval.",
+        )
+    return {"status": "approved"}
+
+
 @app.websocket("/ws/runs/{run_id}")
 async def run_events(ws: WebSocket, run_id: str) -> None:
     """WebSocket endpoint that streams ReasoningEvent objects for a run.
 
     Events include: run_started, agent_update, file_generated, files_ready,
-    run_completed, run_failed, run_cancelled.
+    tutor_file_generated, approval_required, run_completed, run_failed,
+    run_cancelled.
     """
     if service.store.get_run(run_id) is None:
         await ws.accept()

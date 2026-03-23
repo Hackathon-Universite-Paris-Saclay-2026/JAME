@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -14,6 +14,7 @@ class RunStatus(str, Enum):
 
     PENDING = "pending"
     RUNNING = "running"
+    WAITING_FOR_APPROVAL = "waiting_for_approval"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -31,6 +32,15 @@ class RunCreateRequest(BaseModel):
         ge=1,
         le=10,
         description="Maximum QA→Developer retry loops before forcing completion.",
+    )
+    mode: Literal["expert", "senior", "junior"] = Field(
+        default="expert",
+        description=(
+            "Execution mode. "
+            "'expert': pause before critical nodes (developer, devops). "
+            "'senior': pause before every node for full human-in-the-loop. "
+            "'junior': auto-run with tutor node that blanks code for learning."
+        ),
     )
 
 

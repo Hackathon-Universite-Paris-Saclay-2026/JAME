@@ -6,6 +6,7 @@ import asyncio
 from collections import defaultdict
 from datetime import UTC, datetime
 import json
+import threading
 
 from cancel_token import CancelToken
 
@@ -23,6 +24,9 @@ class InMemoryRunStore:
         self._cancelled: set[str] = set()
         self._tokens: dict[str, CancelToken] = {}
         self._chunk_queues: dict[str, asyncio.Queue] = {}
+        # Approval events — used by Expert/Senior modes to block the worker
+        # thread until the user approves the next node.
+        self._approval_events: dict[str, threading.Event] = {}
 
     def create_run(self, run_id: str, request: RunCreateRequest) -> RunRecord:
         """Create and persist a new run record in pending state."""
@@ -70,7 +74,10 @@ class InMemoryRunStore:
     def cancel_run(self, run_id: str) -> bool:
         """Cancel a running run — fires the token AND unblocks the async queue immediately."""
         record = self._runs.get(run_id)
-        if record and record.status == RunStatus.RUNNING:
+        if record and record.status in (
+            RunStatus.RUNNING,
+            RunStatus.WAITING_FOR_APPROVAL,
+        ):
             self._cancelled.add(run_id)
             token = self._tokens.get(run_id)
             if token:
@@ -80,7 +87,32 @@ class InMemoryRunStore:
             queue = self._chunk_queues.get(run_id)
             if queue:
                 queue.put_nowait(("cancelled", None))
+            # Also unblock any worker thread waiting for approval
+            approval = self._approval_events.get(run_id)
+            if approval:
+                approval.set()
             return True
+        return False
+
+    # ── Approval support (Expert / Senior modes) ─────────────────
+
+    def register_approval_event(
+        self, run_id: str, event: threading.Event
+    ) -> None:
+        """Register a threading.Event the worker thread waits on for approval."""
+        self._approval_events[run_id] = event
+
+    def approve_run(self, run_id: str) -> bool:
+        """Grant approval so the worker thread resumes the graph.
+
+        Returns True if an approval event was found and signalled.
+        """
+        record = self._runs.get(run_id)
+        if record and record.status == RunStatus.WAITING_FOR_APPROVAL:
+            approval = self._approval_events.get(run_id)
+            if approval:
+                approval.set()
+                return True
         return False
 
     def is_cancelled(self, run_id: str) -> bool:

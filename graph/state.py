@@ -185,7 +185,11 @@ class AgentState(TypedDict):
     qa_feedback: str  # plain-text feedback sent back to Developer on failure
     qa_issues: list[QAIssue]  # structured, actionable issue tickets
 
+    # ── Tutor outputs (Junior mode only) ────────────────────────
+    tutor_files: list[CodeFile]  # exercise versions with blanks
+
     # ── Orchestrator bookkeeping ────────────────────────────────
+    mode: str  # "expert" | "senior" | "junior"
     iteration: int  # QA retry counter
     max_iterations: int  # safety cap
     reasoning_logs: Annotated[
