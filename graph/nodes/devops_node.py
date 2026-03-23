@@ -245,6 +245,17 @@ def _collect_file_tasks(
     return tasks, meta
 
 
+def _is_degenerate(content: str, file_path: str) -> bool:
+    """Return True when the LLM returned a placeholder instead of real content.
+
+    Catches the case where deepseek-r1 echoes the filename (or its basename)
+    into the content field instead of generating actual file content.
+    """
+    stripped = content.strip()
+    basename = file_path.split("/")[-1]
+    return stripped in (file_path, basename) or len(stripped) < 10
+
+
 def _generate_file(
     llm: BaseChatModel,
     system_prompt: str,
@@ -254,8 +265,9 @@ def _generate_file(
 ) -> str:
     """Generate the content of a single DevOps file using the LLM.
 
-    Tries structured output (SingleFileContent) first, then falls back to a
-    raw completion if structured output fails.
+    Tries structured output (SingleFileContent) first, falls back to a raw
+    completion on failure or degenerate output, then retries with an explicit
+    prompt if the result is still degenerate.
 
     Args:
         llm: The language model to use.
@@ -265,13 +277,14 @@ def _generate_file(
         hint: File-specific instructions from FILE_HINT.
 
     Returns:
-        The generated file content, or an empty string if both attempts fail.
+        The generated file content, or an empty string if all attempts fail.
     """
     user_msg = (
         f"{context}\n\n"
         f"## File to generate\nPath: `{file_path}`\n\n"
         f"## Instructions\n{hint}"
     )
+    content = ""
     try:
         result: SingleFileContent = llm.with_structured_output(
             SingleFileContent
@@ -281,9 +294,11 @@ def _generate_file(
                 HumanMessage(content=user_msg),
             ]
         )
-        return _strip_fences(result.content)
+        content = _strip_fences(result.content)
     except Exception as exc:
         print(f"[ACT]  structured output failed for {file_path}: {exc}")
+
+    if not content or _is_degenerate(content, file_path):
         try:
             response = llm.invoke(
                 [
@@ -291,10 +306,33 @@ def _generate_file(
                     HumanMessage(content=user_msg),
                 ]
             )
-            return _strip_fences(response.content)
+            content = _strip_fences(response.content)
         except Exception as exc2:
             print(f"[ACT]  raw completion failed for {file_path}: {exc2}")
             return ""
+
+    # Last-chance retry with an explicit prompt if still degenerate
+    if _is_degenerate(content, file_path):
+        print(f"[ACT]  degenerate output for {file_path} — retrying with explicit prompt")
+        try:
+            retry_msg = (
+                f"Generate the complete content of the file `{file_path}`.\n\n"
+                f"{hint}\n\n"
+                "Return ONLY the raw file content. Do NOT return the filename. "
+                "Do NOT use markdown fences."
+            )
+            response = llm.invoke(
+                [
+                    SystemMessage(content=system_prompt),
+                    HumanMessage(content=retry_msg),
+                ]
+            )
+            content = _strip_fences(response.content)
+        except Exception as exc3:
+            print(f"[ACT]  retry failed for {file_path}: {exc3}")
+            return ""
+
+    return content
 
 
 # ── Main node ─────────────────────────────────────────────────────────────────
