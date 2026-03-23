@@ -87,7 +87,7 @@ def validate_submission(
     submitted_files: list[dict | CodeFile],
     golden_files: list[dict | CodeFile],
     learning_objectives: list[str],
-    hints: list[str],
+    hints: list[str],  # noqa: ARG001
     hint_level: int,
 ) -> dict:
     """Validate a junior's submission against the golden solution.

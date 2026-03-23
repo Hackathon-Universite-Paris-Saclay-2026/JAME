@@ -63,14 +63,14 @@ def build_graph() -> StateGraph:
     # ── Nodes ────────────────────────────────────────────────────
     workflow.add_node("architect", architect_node)
     workflow.add_node("developer", developer_node)
-    workflow.add_node("qa", qa_node)  # DISABLED — re-enable for production
+    workflow.add_node("qa", qa_node)
     workflow.add_node("devops", devops_node)
     workflow.add_node("stripper", stripper_node)
 
     # ── Edges ────────────────────────────────────────────────────
     workflow.set_entry_point("architect")
     workflow.add_edge("architect", "developer")
-    workflow.add_edge("developer", "devops")  # QA bypassed
+    workflow.add_edge("developer", "qa")
     workflow.add_conditional_edges(
         "qa",
         _should_retry_or_continue,

@@ -13,14 +13,6 @@ import uuid
 
 from pydantic import BaseModel
 
-
-def _pydantic_encoder(obj: Any) -> Any:
-    """JSON encoder that serialises Pydantic models as dicts instead of str()."""
-    if isinstance(obj, BaseModel):
-        return obj.model_dump()
-    return str(obj)
-
-
 from cancel_token import CancelToken, RunCancelledError, set_current_token
 from graph.graph import build_graph
 from graph.nodes.validator_node import validate_submission as _validate
@@ -29,6 +21,13 @@ from utils.node import save_artifacts
 
 from .job_store import InMemoryRunStore
 from .models import ReasoningEvent, RunCreateRequest, RunStatus
+
+
+def _pydantic_encoder(obj: Any) -> Any:
+    """JSON encoder that serialises Pydantic models as dicts instead of str()."""
+    if isinstance(obj, BaseModel):
+        return obj.model_dump()
+    return str(obj)
 
 
 class OrchestratorService:
