@@ -191,3 +191,12 @@ class AgentState(TypedDict):
     reasoning_logs: Annotated[
         list[ReasoningEntry], operator.add
     ]  # append-only trace
+
+    # ── Learning mode ────────────────────────────────────────────
+    learning_mode: bool  # True → run Stripper after DevOps
+    golden_files: list[CodeFile]  # complete solution (hidden from junior)
+    exercise_files: list[CodeFile]  # files with TODOs for the junior
+    learning_objectives: list[str]  # what the junior must implement
+    hints: list[str]  # progressive hints (unlocked one by one)
+    validation_feedback: str  # feedback from Validator after submission
+    hint_level: int  # number of hints unlocked so far
