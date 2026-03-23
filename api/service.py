@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from datetime import UTC, datetime
 import json
 from pathlib import Path
@@ -150,16 +151,18 @@ class OrchestratorService:
         )
         try:
             return await asyncio.wait_for(future, timeout=300.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return ""
 
     def _make_clarify_fn(
         self, run_id: str, loop: asyncio.AbstractEventLoop
-    ):
+    ) -> Callable[[str, list[str] | None], str]:
         """Return a sync callable that can be called from the graph worker thread."""
         svc = self
 
-        def _clarify_sync(question: str, options: list[str] | None = None) -> str:
+        def _clarify_sync(
+            question: str, options: list[str] | None = None
+        ) -> str:
             coro = svc._request_clarification(run_id, question, options or [])
             future = asyncio.run_coroutine_threadsafe(coro, loop)
             try:
@@ -500,7 +503,9 @@ class OrchestratorService:
 
             # Exclude non-serialisable fields before JSON-encoding the state
             serialisable_state = {
-                k: v for k, v in final_state.items() if k != "clarification_callback"
+                k: v
+                for k, v in final_state.items()
+                if k != "clarification_callback"
             }
             result = {
                 "qa_passed": final_state.get("qa_passed", False),
