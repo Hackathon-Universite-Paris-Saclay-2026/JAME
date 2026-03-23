@@ -37,6 +37,17 @@ class RunCreateRequest(BaseModel):
         default=False,
         description="Enable Learning Mode: generates exercise files with TODOs for junior developers.",
     )
+    mode: str = Field(
+        default="senior",
+        pattern="^(junior|senior|expert)$",
+        description="Agent behaviour mode: junior (minimal), senior (production), expert (enterprise).",
+    )
+
+
+class ClarifyRequest(BaseModel):
+    """Request body for POST /runs/{run_id}/clarify."""
+
+    answer: str = Field(min_length=1, description="User's answer to the architect's clarification question.")
 
 
 class SubmitRequest(BaseModel):

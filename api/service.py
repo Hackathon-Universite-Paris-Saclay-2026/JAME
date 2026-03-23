@@ -130,10 +130,44 @@ class OrchestratorService:
             run_id,
             "hint_unlocked",
             f"Hint {hint_level + 1}/{len(hints)} unlocked.",
-            agent="stripper",
+            agent="exercise_generator",
             payload={"hint": hint, "hint_level": hint_level + 1},
         )
         return hint
+
+    async def _request_clarification(
+        self, run_id: str, question: str, options: list[str]
+    ) -> str:
+        """Emit a clarification_request event and await the user's answer (max 300s)."""
+        future = self.store.request_clarification(run_id)
+        await self._emit(
+            run_id,
+            "clarification_request",
+            question,
+            agent="architect",
+            phase="interrogation",
+            payload={"question": question, "options": options},
+        )
+        try:
+            return await asyncio.wait_for(future, timeout=300.0)
+        except asyncio.TimeoutError:
+            return ""
+
+    def _make_clarify_fn(
+        self, run_id: str, loop: asyncio.AbstractEventLoop
+    ):
+        """Return a sync callable that can be called from the graph worker thread."""
+        svc = self
+
+        def _clarify_sync(question: str, options: list[str] | None = None) -> str:
+            coro = svc._request_clarification(run_id, question, options or [])
+            future = asyncio.run_coroutine_threadsafe(coro, loop)
+            try:
+                return future.result(timeout=305.0)
+            except Exception:
+                return ""
+
+        return _clarify_sync
 
     async def _emit(
         self,
@@ -184,6 +218,9 @@ class OrchestratorService:
         chunk_queue: asyncio.Queue = asyncio.Queue()
         self.store.register_token(run_id, token, chunk_queue)
 
+        loop = asyncio.get_running_loop()
+        clarify_fn = self._make_clarify_fn(run_id, loop)
+
         initial_state: AgentState = {
             "user_request": request.user_request,
             "scope": "",
@@ -200,6 +237,8 @@ class OrchestratorService:
             "qa_issues": [],
             "iteration": 0,
             "max_iterations": request.max_iterations,
+            "mode": request.mode,
+            "clarification_callback": clarify_fn,
             "reasoning_logs": [],
             # Learning mode fields
             "learning_mode": request.learning_mode,
@@ -217,7 +256,6 @@ class OrchestratorService:
         final_state: AgentState = initial_state
 
         # chunk_queue already created above (registered with store for instant cancel)
-        loop = asyncio.get_running_loop()
 
         def _run_graph_sync() -> None:
             """Run LangGraph synchronously in a worker thread, streaming chunks via queue."""
@@ -349,8 +387,8 @@ class OrchestratorService:
                             },
                         )
 
-                    # After stripper: save exercise files to disk + emit event
-                    if node_name == "stripper":
+                    # After exercise_generator: save exercise files to disk + emit event
+                    if node_name == "exercise_generator":
                         exercise_files = node_update.get("exercise_files", [])
                         objectives = node_update.get("learning_objectives", [])
 
@@ -398,7 +436,7 @@ class OrchestratorService:
                                 f"Learning exercise ready — "
                                 f"{len(objectives)} objective(s) to implement."
                             ),
-                            agent="stripper",
+                            agent="exercise_generator",
                             phase="LEARNING",
                             payload={
                                 "exercise_dir": str(exercise_dir),
@@ -460,6 +498,10 @@ class OrchestratorService:
                         str((project_dir / rel_path).resolve())
                     )
 
+            # Exclude non-serialisable fields before JSON-encoding the state
+            serialisable_state = {
+                k: v for k, v in final_state.items() if k != "clarification_callback"
+            }
             result = {
                 "qa_passed": final_state.get("qa_passed", False),
                 "qa_feedback": final_state.get("qa_feedback", ""),
@@ -468,7 +510,7 @@ class OrchestratorService:
                 "project_dir": str(project_dir),
                 "generated_files": generated_files,
                 "state": json.loads(
-                    json.dumps(final_state, default=_pydantic_encoder)
+                    json.dumps(serialisable_state, default=_pydantic_encoder)
                 ),
             }
 
