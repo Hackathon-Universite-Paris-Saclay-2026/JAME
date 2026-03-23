@@ -1718,25 +1718,94 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
       scrollFeed();
     }
 
+    // ── Clarification card ────────────────────────────────────────
+    function showClarificationCard(question, options) {
+      const card = document.createElement('div');
+      card.className = 'clarify-card fade-in';
+
+      const header = document.createElement('div');
+      header.className = 'clarify-card-header';
+      const title = document.createElement('div');
+      title.className = 'clarify-card-title';
+      title.textContent = 'Architect needs clarification';
+      header.appendChild(title);
+      card.appendChild(header);
+
+      const body = document.createElement('div');
+      body.className = 'clarify-card-body';
+
+      const qEl = document.createElement('div');
+      qEl.className = 'clarify-question';
+      qEl.innerHTML = renderMd(question);
+      body.appendChild(qEl);
+
+      const submitAnswer = (answer) => {
+        if (!answer.trim()) return;
+        card.classList.add('answered');
+        addSysMsg('Clarification submitted: ' + answer, 'ok');
+        vscode.postMessage({ command: 'submitClarification', runId: currentRunId, answer: answer.trim() });
+      };
+
+      // Option buttons
+      if (options && options.length > 0) {
+        const optDiv = document.createElement('div');
+        optDiv.className = 'clarify-options';
+        options.forEach((opt, i) => {
+          const btn = document.createElement('button');
+          btn.className = 'clarify-option-btn';
+          btn.textContent = String.fromCharCode(65 + i) + '. ' + opt;
+          btn.addEventListener('click', () => submitAnswer(opt));
+          optDiv.appendChild(btn);
+        });
+        body.appendChild(optDiv);
+      }
+
+      // Free-text input
+      const inputRow = document.createElement('div');
+      inputRow.className = 'clarify-input-row';
+
+      const textArea = document.createElement('textarea');
+      textArea.className = 'clarify-text';
+      textArea.placeholder = 'Or type your own clarification...';
+      textArea.rows = 1;
+      inputRow.appendChild(textArea);
+
+      const submitBtn = document.createElement('button');
+      submitBtn.className = 'btn btn-primary';
+      submitBtn.textContent = 'Send';
+      submitBtn.addEventListener('click', () => submitAnswer(textArea.value));
+      textArea.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitAnswer(textArea.value); }
+      });
+      inputRow.appendChild(submitBtn);
+      body.appendChild(inputRow);
+
+      card.appendChild(body);
+      feed.appendChild(card);
+      scrollFeed();
+    }
+
     // ── Send / stop ───────────────────────────────────────────────
     function send() {
       const text = inputEl.value.trim();
       if (!text || isRunning) return;
 
+      const mode = modeSelect ? modeSelect.value : 'senior';
+
       // Reset state
       generatedFiles = [];
       projectDir = null;
-      reviewCardFiles = [];
-      reviewCardProjectDir = null;
       currentIteration = 0;
       lastAgent = null;
+      _lastRowAc = null;
+      resetFilesPanel();
 
       addUserMessage(text);
       inputEl.value = '';
       inputEl.style.height = 'auto';
       setRunning(true);
 
-      vscode.postMessage({ command: 'startRun', userRequest: text });
+      vscode.postMessage({ command: 'startRun', userRequest: text, mode });
     }
 
     function stop() {
@@ -1780,17 +1849,27 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
         ws = new WebSocket(wsUrl);
 
         ws.onmessage = (evt) => {
-          const data = JSON.parse(evt.data);
-          handleServerEvent(data);
-        };
-
-        ws.onclose = () => {
-          if (isRunning) {
-            setRunning(false);
+          let data;
+          try {
+            data = JSON.parse(evt.data);
+          } catch (e) {
+            console.warn('[JAME] bad WS frame:', evt.data, e);
+            return; // skip unparseable frame, keep listening
+          }
+          try {
+            handleServerEvent(data);
+          } catch (e) {
+            console.error('[JAME] handleServerEvent threw:', e, data);
           }
         };
 
-        ws.onerror = () => {
+        ws.onclose = () => {
+          // Always stop — covers cases where terminal event was missed
+          setRunning(false);
+        };
+
+        ws.onerror = (e) => {
+          console.error('[JAME] WebSocket error', e);
           addSysMsg('WebSocket error. Is the backend running?', 'err');
           setRunning(false);
         };
@@ -1798,32 +1877,36 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
 
       if (msg.command === 'filesSaved') {
         addSysMsg('Files saved to ' + msg.destDir, 'ok');
+        return;
+      }
+
+      if (msg.command === 'allAccepted') {
+        addSysMsg('All proposed changes accepted to workspace.', 'ok');
+        return;
+      }
+
+      if (msg.command === 'allDiscarded') {
+        addSysMsg('All proposed changes discarded.', 'warn');
+        return;
       }
     });
 
-    const AGENT_PHASES = {
-      'Architect':        'INCEPTION',
-      'architect':        'INCEPTION',
-      'Developer':        'CONSTRUCTION',
-      'developer':        'CONSTRUCTION',
-      'Delivery':         'CONSTRUCTION',
-      'delivery_engineer':'CONSTRUCTION',
-      'Quality Engineer': 'CONSTRUCTION / QA',
-      'quality_engineer': 'CONSTRUCTION / QA',
-      'QA':               'CONSTRUCTION / QA',
-    };
-
     const AGENT_DISPLAY = {
-      'architect':         'Architect',
-      'developer':         'Developer',
-      'delivery_engineer': 'Delivery',
-      'quality_engineer':  'Quality Engineer',
+      'architect':          'Architect',
+      'developer':          'Developer',
+      'delivery_engineer':  'Delivery',
+      'quality_engineer':   'Quality Engineer',
+      'devops':             'DevOps',
+      'exercise_generator': 'Exercise',
     };
 
     function handleServerEvent(data) {
-      const event = data.event;
-      const rawAgent = data.agent || '';
-      const agentDisplay = AGENT_DISPLAY[rawAgent] || rawAgent || 'Orchestrator';
+      if (!data || typeof data !== 'object') return;
+      const event = String(data.event || '');
+      const rawAgent = String(data.agent || '');
+      const agentDisplay = AGENT_DISPLAY[rawAgent] || rawAgent || 'System';
+
+      console.log('[JAME event]', event, rawAgent, data.message);
 
       if (event === 'run_started') {
         addSysMsg('Orchestration started', 'info');
@@ -1831,52 +1914,70 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
       }
 
       if (event === 'agent_update') {
-        const msg = data.message || '';
-        const thinking = data.payload && data.payload.thinking ? data.payload.thinking : '';
+        const msg = String(data.message || '').trim();
+        const payload = (data.payload && typeof data.payload === 'object') ? data.payload : {};
+        const thinking = String(payload.thinking || '');
+        // phase: prefer top-level field (set by service._emit), fall back to payload
+        const phase = data.phase || payload.phase || null;
+
+        // Skip truly empty messages
         if (!msg) return;
+
+        // Only filter the exact "Generated N file(s)." pattern (not chunked/self-val messages)
+        // These come from the developer "act" log and duplicate file_generated events.
+        if (
+          (rawAgent === 'developer') &&
+          new RegExp('^Generated \\d+ file\\(s\\)', 'i').test(msg)
+        ) {
+          return;
+        }
 
         // Detect QA → Developer transition → insert iteration separator
         if (
           lastAgent &&
           lastAgent !== agentDisplay &&
-          (lastAgent === 'Quality Engineer' || lastAgent === 'QA') &&
-          (agentDisplay === 'Developer')
+          (lastAgent === 'Quality Engineer' || lastAgent === 'QA' || lastAgent === 'quality_engineer') &&
+          (agentDisplay === 'Developer' || rawAgent === 'developer')
         ) {
           currentIteration++;
+          _lastRowAc = null;
           addIterSep('QA feedback — revision ' + currentIteration);
         }
 
         lastAgent = agentDisplay;
-        addTlRow(agentDisplay, msg, thinking);
+        addTlRow(agentDisplay, msg, thinking, phase);
         return;
       }
 
       if (event === 'file_generated') {
         const p = data.payload;
         if (p && p.path) {
-          const isRev = currentIteration > 0;
-          addFileDiffRow(p.path, p.content || '', p.language || 'text', isRev);
+          // Save to workspace immediately so diff editor has real content
+          vscode.postMessage({ command: 'openProposedChange', filePath: p.path, fileContent: p.content || '' });
+          addFileToPanel(p.path, p.content || '');
           generatedFiles.push(p.path);
         }
         return;
       }
 
       if (event === 'files_ready') {
+        // files_ready just confirms all files are on disk — panel already shows them
+        return;
+      }
+
+      if (event === 'clarification_request') {
         const p = data.payload || {};
-        const files = p.generated_files || [];
-        const pDir = p.project_dir || null;
-        const iter = p.iteration || currentIteration;
-        showReviewCard(files, pDir, iter);
+        const question = p.question || data.message || 'Please clarify:';
+        const options = p.options || [];
+        showClarificationCard(question, options);
         return;
       }
 
       if (event === 'run_completed') {
         const p = data.payload || {};
-        const files = p.generated_files || [];
         projectDir = p.project_dir || null;
         const qaPassed = !!p.qa_passed;
-
-        showActionsBar(files, projectDir, qaPassed);
+        setFilesPanelVerdict(qaPassed);
         setRunning(false);
         clearProgress();
         if (ws) ws.close();
@@ -1898,6 +1999,9 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
         if (ws) ws.close();
         return;
       }
+
+      // Unknown event — log to console, don't silently drop
+      console.warn('[JAME] unrecognized event:', event, data);
     }
 
     // Focus on load
