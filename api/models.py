@@ -47,7 +47,10 @@ class RunCreateRequest(BaseModel):
 class ClarifyRequest(BaseModel):
     """Request body for POST /runs/{run_id}/clarify."""
 
-    answer: str = Field(min_length=1, description="User's answer to the architect's clarification question.")
+    answer: str = Field(
+        min_length=1,
+        description="User's answer to the architect's clarification question.",
+    )
 
 
 class SubmitRequest(BaseModel):

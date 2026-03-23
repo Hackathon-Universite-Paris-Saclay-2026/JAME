@@ -17,8 +17,8 @@ from langgraph.graph import END, StateGraph
 from graph.nodes.architect_node import architect_node
 from graph.nodes.developer_node import developer_node
 from graph.nodes.devops_node import devops_node
-from graph.nodes.qa_node import qa_node
 from graph.nodes.exercise_generator_node import exercise_generator_node
+from graph.nodes.qa_node import qa_node
 from graph.state import AgentState
 
 

@@ -14,6 +14,7 @@ server never blocks waiting for stdin.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import sys
 
 from langchain_core.language_models import BaseChatModel
@@ -163,7 +164,7 @@ def _interrogate_api(
     llm: BaseChatModel,
     user_request: str,
     max_rounds: int,
-    callback,  # callable(question: str, options: list[str]) -> str
+    callback: Callable[[str, list[str]], str],
 ) -> list[dict]:
     """Run up to max_rounds of Q&A using the API callback instead of stdin.
 

@@ -189,7 +189,9 @@ class AgentState(TypedDict):
     iteration: int  # QA retry counter
     max_iterations: int  # safety cap
     mode: str  # "junior" | "senior" | "expert" — agent behaviour mode
-    clarification_callback: Any  # callable(question, options) -> answer (not serialised)
+    clarification_callback: (
+        Any  # callable(question, options) -> answer (not serialised)
+    )
     reasoning_logs: Annotated[
         list[ReasoningEntry], operator.add
     ]  # append-only trace
