@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import operator
 import re
-from typing import Annotated, TypedDict
+from typing import Annotated, Any, TypedDict
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -188,6 +188,8 @@ class AgentState(TypedDict):
     # ── Orchestrator bookkeeping ────────────────────────────────
     iteration: int  # QA retry counter
     max_iterations: int  # safety cap
+    mode: str  # "junior" | "senior" | "expert" — agent behaviour mode
+    clarification_callback: Any  # callable(question, options) -> answer (not serialised)
     reasoning_logs: Annotated[
         list[ReasoningEntry], operator.add
     ]  # append-only trace
