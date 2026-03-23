@@ -1,3 +1,4 @@
+SHELL := $(or $(shell which bash 2>/dev/null),/bin/sh)
 .PHONY: help create-venv install-deps run test format lint-with-auto-fix extension
 
 ## Show available targets
