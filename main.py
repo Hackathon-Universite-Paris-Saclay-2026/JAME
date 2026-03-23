@@ -13,4 +13,5 @@ if __name__ == "__main__":
         host=settings.host,
         port=settings.port,
         reload=True,
+        reload_dirs=["api", "graph", "utils", "prompts", "integrations"],
     )
