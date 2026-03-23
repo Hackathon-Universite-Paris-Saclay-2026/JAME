@@ -464,16 +464,17 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
       const freePort = await this.findFreePort(basePort);
       const resolvedUrl = `${parsed.protocol}//${parsed.hostname}:${freePort}`;
       this.resolvedBackendUrl = resolvedUrl;
-      this.backendStartupPromise = this.startBackend(resolvedUrl);
+      this.backendStartupPromise = this.startBackend(resolvedUrl).catch((err) => {
+        // Reset so the next Send attempt tries again rather than re-throwing a stale rejection.
+        this.backendStartupPromise = undefined;
+        this.resolvedBackendUrl = undefined;
+        throw err;
+      });
       // Notify webview of the actual URL being used (in case port shifted)
       this.view?.webview.postMessage({ command: "backendUrlResolved", backendUrl: resolvedUrl });
     }
 
     await this.backendStartupPromise;
-    // If the backend was already healthy on first check, store the configured URL
-    if (!this.resolvedBackendUrl) {
-      this.resolvedBackendUrl = backendUrl;
-    }
   }
 
   /** Scan ports starting at basePort until we find one with no healthy JAME backend. */
@@ -488,7 +489,7 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async startBackend(backendUrl: string): Promise<void> {
-    this.view?.webview.postMessage({ command: "system", message: "Starting backend..." });
+    this.view?.webview.postMessage({ command: "system", message: "Starting backend on " + backendUrl + "…" });
 
     const extensionDir = this.extensionUri.fsPath;
     const repoRoot = path.resolve(extensionDir, "..");
@@ -504,7 +505,7 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
 
     this.backendProcess = spawn(
       venvPython,
-      ["-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", port],
+      ["-m", "uvicorn", "api.app:app", "--host", "0.0.0.0", "--port", port],
       {
         cwd: repoRoot,
         stdio: "ignore",
@@ -553,6 +554,7 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src http://localhost:* ws://localhost:*;" />
   <style>
     *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -640,85 +642,94 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
       word-break: break-word;
     }
 
-    /* ── Timeline row ────────────────────────────────────────────── */
-    .tl-row {
-      display: flex;
-      align-items: flex-start;
-      gap: 8px;
-      padding: 3px 12px;
-      animation: fadeSlideIn 0.2s ease forwards;
+    /* ── Agent log rows ──────────────────────────────────────────── */
+    /* Rows grow to fit content — tag/pill stay top-aligned */
+    .agent-row {
+      display: flex; align-items: flex-start; gap: 6px;
+      padding: 2px 10px;
+      font-size: 11.5px;
+      animation: fadeSlideIn 0.15s ease forwards;
+      border-left: 2px solid transparent;
+    }
+    .agent-row:hover { background: rgba(255,255,255,0.03); }
+
+    /* left accent by agent */
+    .agent-row.ac-architect { border-left-color: #4a9fd4; }
+    .agent-row.ac-developer { border-left-color: #4ec94e; }
+    .agent-row.ac-delivery  { border-left-color: #d4c24a; }
+    .agent-row.ac-qa        { border-left-color: #c04ac0; }
+    .agent-row.ac-system    { border-left-color: #555; }
+
+    /* Agent tag — short uppercase label, fixed width, top-aligned */
+    .ar-tag {
+      font-size: 10px; font-weight: 700; letter-spacing: 0.07em;
+      text-transform: uppercase; flex-shrink: 0;
+      width: 56px; padding-top: 2px; line-height: 1.4;
+    }
+    .ac-architect .ar-tag { color: #7ec0f0; }
+    .ac-developer .ar-tag { color: #7ece7e; }
+    .ac-delivery  .ar-tag { color: #d4c26a; }
+    .ac-qa        .ar-tag { color: #c07ec0; }
+    .ac-system    .ar-tag { color: #7a7a7a; }
+    /* repeated agent on consecutive rows — dim the tag */
+    .agent-row.same-agent .ar-tag { color: transparent; }
+
+    /* Phase pill — stays on first line even if message wraps */
+    .ar-phase {
+      font-size: 9px; font-weight: 600; letter-spacing: 0.05em;
+      text-transform: uppercase; padding: 1px 5px; border-radius: 10px;
+      flex-shrink: 0; white-space: nowrap; margin-top: 1px; align-self: flex-start;
+    }
+    .phase-plan        { background: #1a2f4a; color: #7ec0f0; }
+    .phase-act         { background: #1a3a1a; color: #7ece7e; }
+    .phase-reason      { background: #3a3a10; color: #d4c26a; }
+    .phase-design      { background: #1a2f4a; color: #7ec0f0; }
+    .phase-validate    { background: #2a1a3a; color: #c07ec0; }
+    .phase-self_critique { background: #2a1a3a; color: #c07ec0; }
+    .phase-classify    { background: #1a2a2a; color: #7ecfc0; }
+    .phase-interrogation { background: #2a2010; color: #d4a46a; }
+    .phase-construction { background: #1a3a1a; color: #7ece7e; }
+    .phase-learning    { background: #2a1a3a; color: #c07ec0; }
+    .phase-other       { background: #252525; color: #7a7a7a; }
+
+    /* Message text — wraps naturally, row height follows content */
+    .ar-msg {
+      flex: 1; color: #d4d4d4; line-height: 1.5;
+      white-space: normal; word-break: break-word;
     }
 
-    .tl-badge {
-      font-size: 9px;
-      font-weight: 700;
-      letter-spacing: 0.05em;
-      text-transform: uppercase;
-      padding: 2px 5px;
-      border-radius: 3px;
-      flex-shrink: 0;
-      margin-top: 1px;
-      min-width: 64px;
-      text-align: center;
+    /* Thinking toggle button */
+    .ar-think-btn {
+      flex-shrink: 0; font-size: 9px; color: #5a5a8a;
+      cursor: pointer; user-select: none; padding: 1px 5px;
+      background: #10102a; border: 1px solid #2a2a4a; border-radius: 3px;
+      line-height: 16px; align-self: flex-start; margin-top: 1px; white-space: nowrap;
     }
+    .ar-think-btn:hover { color: #9090d0; }
 
-    .badge-architect   { background: #1a2a3f; color: #7ec0f0; border: 1px solid #2a4a6f; }
-    .badge-developer   { background: #1f2a1f; color: #7ece7e; border: 1px solid #2f4f2f; }
-    .badge-delivery    { background: #2a2a1a; color: #d4c26a; border: 1px solid #4f4f1f; }
-    .badge-qa          { background: #2a1a2a; color: #c07ec0; border: 1px solid #4f1f4f; }
-    .badge-system      { background: transparent; color: #5a5a5a; border: 1px solid #3a3a3a; }
-
-    .tl-text {
-      flex: 1;
-      font-size: 12px;
-      color: #c5c5c5;
-      line-height: 1.5;
-    }
-
-    .tl-thinking-toggle {
-      font-size: 10px;
-      color: #5a5a7a;
-      cursor: pointer;
-      padding: 1px 5px;
-      border-radius: 2px;
-      border: 1px solid #3a3a5a;
-      background: transparent;
-      flex-shrink: 0;
-      transition: color 0.15s, border-color 0.15s;
-    }
-    .tl-thinking-toggle:hover { color: #9090c0; border-color: #6060a0; }
-    .tl-thinking-toggle.open  { color: #7ec0f0; border-color: #0e639c; }
-
-    /* ── Thinking block ──────────────────────────────────────────── */
-    .thinking-block {
-      margin: 2px 12px 4px calc(12px + 64px + 8px);
-      border: 1px solid #2a2a4a;
-      border-radius: 4px;
-      overflow: hidden;
+    /* Thinking content — hidden by default, shown below the row */
+    .ar-think-content {
       display: none;
-    }
-    .thinking-block.shown { display: block; }
-    .thinking-header {
-      padding: 3px 8px;
-      background: #14142a;
-      font-size: 10px;
-      font-weight: 600;
-      color: #7ec0f0;
-      letter-spacing: 0.05em;
-      text-transform: uppercase;
-    }
-    .thinking-content {
-      padding: 5px 8px;
+      padding: 5px 10px 5px 72px; /* indent to align under message */
       font-size: 11px;
       font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace;
-      color: #7a7a9a;
-      background: #0d0d1e;
-      white-space: pre-wrap;
-      word-break: break-word;
-      max-height: 180px;
-      overflow-y: auto;
-      line-height: 1.5;
+      color: #6a6a9a; background: #0a0a1a;
+      white-space: pre-wrap; word-break: break-word;
+      max-height: 180px; overflow-y: auto; line-height: 1.5;
+      border-left: 2px solid #2a2a5a;
+      margin: 0 10px 2px;
+      border-radius: 0 0 4px 4px;
+      animation: fadeSlideIn 0.15s ease forwards;
     }
+    .ar-think-content.shown { display: block; }
+
+    /* Legacy — kept so old addTlRow callers don't crash */
+    .tl-row { display: none; }
+    .tl-badge { display: none; }
+    .tl-text  { display: none; }
+    /* Old card classes — hidden */
+    .agent-card { display: none; }
+    .thinking-block { display: none; }
 
     /* ── Iteration separator ─────────────────────────────────────── */
     .iter-sep {
@@ -770,39 +781,62 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
       flex-shrink: 0;
     }
 
-    /* ── Inline review card ──────────────────────────────────────── */
-    .review-card {
-      margin: 6px 12px;
-      border: 1px solid #2a4a6a;
-      border-radius: 5px;
-      background: #141e2a;
-      overflow: hidden;
+    /* ── Files panel (above input, Copilot-style) ────────────────── */
+    .files-panel {
+      display: none;
+      flex-direction: column;
+      border-top: 1px solid #3e3e42;
+      background: #1e1e1e;
+      flex-shrink: 0;
+      max-height: 220px;
     }
-    .review-card-header {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 7px 12px;
-      background: #1a2a3a;
-      border-bottom: 1px solid #2a3a4a;
+    .files-panel.visible { display: flex; }
+    .files-panel-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 5px 12px; gap: 8px;
+      border-bottom: 1px solid #2d2d30;
+      background: #252526;
+      flex-shrink: 0;
     }
-    .review-card-dot {
-      width: 7px; height: 7px; border-radius: 50%;
-      background: #4a9d4a; flex-shrink: 0;
-      animation: pulse 1.4s ease-in-out infinite;
+    .files-panel-title {
+      font-size: 10px; font-weight: 600; color: #9d9d9d;
+      text-transform: uppercase; letter-spacing: 0.04em;
     }
-    .review-card.resolved .review-card-dot { animation: none; background: #6a6a6a; }
-    .review-card.kept .review-card-dot     { animation: none; background: #4a9d4a; }
-    .review-card.undone .review-card-dot   { animation: none; background: #d7ba7d; }
-    .review-card-title  { font-size: 11px; font-weight: 600; color: #7ec0f0; flex: 1; }
-    .review-card-sub    { font-size: 10px; color: #5a8abf; }
-    .review-card-body   { padding: 8px 12px; }
-    .review-file-list   { display: flex; flex-direction: column; gap: 3px; margin-bottom: 9px; }
-    .review-file-entry  {
+    .files-panel-summary { font-size: 10px; color: #5a8abf; }
+    .files-panel-actions { display: flex; gap: 5px; }
+    .files-panel-body {
+      overflow-y: auto; padding: 4px 0; flex: 1;
+    }
+    .files-panel-body::-webkit-scrollbar { width: 4px; }
+    .files-panel-body::-webkit-scrollbar-thumb { background: #464647; border-radius: 2px; }
+    .fp-row {
       display: flex; align-items: center; gap: 6px;
-      font-size: 11px; color: #c5c5c5; padding: 1px 0;
+      padding: 3px 12px; cursor: pointer; font-size: 11px;
+      transition: background 0.1s;
     }
-    .review-actions { display: flex; gap: 6px; }
+    .fp-row:hover { background: #2a2d2e; }
+    .fp-ext {
+      font-family: monospace; font-size: 9px; padding: 1px 3px;
+      border-radius: 2px; background: #2d2d30; color: #9d9d9d; flex-shrink: 0;
+    }
+    .fp-name { flex: 1; color: #cccccc; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+    .fp-name:hover { text-decoration: underline; color: #9cdcfe; }
+    .fp-lines { font-family: monospace; font-size: 10px; color: #4a9d4a; flex-shrink: 0; }
+    .fp-action {
+      font-size: 11px; flex-shrink: 0; cursor: pointer; padding: 0 3px;
+      opacity: 0.4; transition: opacity 0.15s;
+    }
+    .fp-action:hover { opacity: 1; }
+    .fp-keep { color: #4ec94e; }
+    .fp-undo { color: #f48771; }
+    .fp-row.fp-kept    { opacity: 0.55; }
+    .fp-row.fp-discarded { opacity: 0.35; text-decoration: line-through; }
+    .fp-verdict {
+      padding: 4px 12px; font-size: 11px; font-weight: 500;
+      border-top: 1px solid #2d2d30;
+    }
+    .fp-verdict.pass { color: #4a9d4a; }
+    .fp-verdict.fail { color: #f48771; }
 
     /* ── Verdict / actions bar ───────────────────────────────────── */
     .verdict {
