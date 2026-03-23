@@ -18,7 +18,7 @@ from graph.nodes.architect_node import architect_node
 from graph.nodes.developer_node import developer_node
 from graph.nodes.devops_node import devops_node
 from graph.nodes.qa_node import qa_node
-from graph.nodes.stripper_node import stripper_node
+from graph.nodes.exercise_generator_node import exercise_generator_node
 from graph.state import AgentState
 
 
@@ -65,7 +65,7 @@ def build_graph() -> StateGraph:
     workflow.add_node("developer", developer_node)
     workflow.add_node("qa", qa_node)
     workflow.add_node("devops", devops_node)
-    workflow.add_node("stripper", stripper_node)
+    workflow.add_node("exercise_generator", exercise_generator_node)
 
     # ── Edges ────────────────────────────────────────────────────
     workflow.set_entry_point("architect")
@@ -78,9 +78,9 @@ def build_graph() -> StateGraph:
     )
     workflow.add_conditional_edges(
         "devops",
-        lambda s: "stripper" if s.get("learning_mode") else END,
-        {"stripper": "stripper", END: END},
+        lambda s: "exercise_generator" if s.get("learning_mode") else END,
+        {"exercise_generator": "exercise_generator", END: END},
     )
-    workflow.add_edge("stripper", END)
+    workflow.add_edge("exercise_generator", END)
 
     return workflow.compile()
