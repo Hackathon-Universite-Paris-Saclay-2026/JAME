@@ -977,12 +977,71 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
       50% { opacity: 0.4; }
     }
 
+    /* ── Phase pills ─────────────────────────────────────────────── */
+    .tl-phase {
+      font-size: 8px; font-weight: 600; letter-spacing: 0.04em;
+      text-transform: uppercase; padding: 1px 4px; border-radius: 2px;
+      flex-shrink: 0; margin-top: 2px; opacity: 0.7;
+    }
+    .phase-plan   { background: #1a2a3f; color: #7ec0f0; }
+    .phase-act    { background: #1f2a1f; color: #7ece7e; }
+    .phase-reason { background: #2a2a1a; color: #d4c26a; }
+    .phase-other  { background: #2a2a2a; color: #7a7a7a; }
+
+    /* ── Clarification card ───────────────────────────────────────── */
+    .clarify-card {
+      margin: 6px 12px;
+      border: 1px solid #2a4a6a;
+      border-radius: 5px;
+      background: #141e2a;
+      overflow: hidden;
+    }
+    .clarify-card-header {
+      display: flex; align-items: center; gap: 8px;
+      padding: 7px 12px;
+      background: #1a2a3a;
+      border-bottom: 1px solid #2a3a4a;
+    }
+    .clarify-card-title { font-size: 11px; font-weight: 600; color: #7ec0f0; flex: 1; }
+    .clarify-card-body  { padding: 8px 12px; display: flex; flex-direction: column; gap: 6px; }
+    .clarify-question   { font-size: 12px; color: #c5c5c5; line-height: 1.5; }
+    .clarify-options    { display: flex; flex-direction: column; gap: 4px; }
+    .clarify-option-btn {
+      text-align: left; padding: 5px 9px; font-size: 11px;
+      background: #1e2d3d; border: 1px solid #2a4a6a; border-radius: 4px;
+      color: #c5c5c5; cursor: pointer; transition: background 0.15s;
+    }
+    .clarify-option-btn:hover { background: #263d54; }
+    .clarify-input-row  { display: flex; gap: 6px; }
+    .clarify-text       {
+      flex: 1; padding: 5px 8px; font-size: 11px; font-family: inherit;
+      background: #2d2d30; border: 1px solid #3e3e42; border-radius: 4px;
+      color: #d4d4d4; outline: none; resize: none; min-height: 32px; max-height: 80px;
+    }
+    .clarify-text:focus { border-color: #0e639c; }
+    .clarify-card.answered { opacity: 0.6; pointer-events: none; }
+
     /* ── Input area ──────────────────────────────────────────────── */
     .input-area {
       border-top: 1px solid #3e3e42;
       padding: 10px 12px;
       flex-shrink: 0;
     }
+
+    /* ── Mode selector ───────────────────────────────────────────── */
+    .mode-row {
+      display: flex; align-items: center; gap: 6px; margin-bottom: 7px;
+    }
+    .mode-label {
+      font-size: 10px; font-weight: 600; color: #6a6a6a;
+      text-transform: uppercase; letter-spacing: 0.04em; flex-shrink: 0;
+    }
+    .mode-select {
+      font-size: 11px; background: #2d2d30; color: #cccccc;
+      border: 1px solid #3e3e42; border-radius: 4px; padding: 2px 6px;
+      cursor: pointer; outline: none;
+    }
+    .mode-select:focus { border-color: #0e639c; }
 
     .input-row {
       display: flex;
@@ -1083,7 +1142,27 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
       </div>
     </div>
 
+    <div class="files-panel" id="filesPanel">
+      <div class="files-panel-header">
+        <span class="files-panel-title">Files changed</span>
+        <span class="files-panel-summary" id="filesPanelSummary"></span>
+        <div class="files-panel-actions">
+          <button class="btn btn-success" id="fpKeepBtn" style="padding:3px 8px;font-size:10px">Keep All</button>
+          <button class="btn btn-danger"  id="fpUndoBtn" style="padding:3px 8px;font-size:10px">Undo All</button>
+        </div>
+      </div>
+      <div class="files-panel-body" id="filesPanelBody"></div>
+    </div>
+
     <div class="input-area">
+      <div class="mode-row">
+        <span class="mode-label">Mode</span>
+        <select id="modeSelect" class="mode-select">
+          <option value="junior">Junior</option>
+          <option value="senior" selected>Senior</option>
+          <option value="expert">Expert</option>
+        </select>
+      </div>
       <div class="input-row">
         <textarea id="input" rows="1" placeholder="Describe what to build..." spellcheck="false"></textarea>
         <button class="stop-btn" id="stopBtn" style="display:none" title="Stop generation">
@@ -1099,21 +1178,116 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
 
   <script>
     const vscode = acquireVsCodeApi();
-    const feed    = document.getElementById('feed');
-    const inputEl = document.getElementById('input');
-    const sendBtn = document.getElementById('sendBtn');
-    const stopBtn = document.getElementById('stopBtn');
-    const progressBar = document.getElementById('progressBar');
+    const feed         = document.getElementById('feed');
+    const inputEl      = document.getElementById('input');
+    const sendBtn      = document.getElementById('sendBtn');
+    const stopBtn      = document.getElementById('stopBtn');
+    const progressBar  = document.getElementById('progressBar');
+    const modeSelect   = document.getElementById('modeSelect');
+    const filesPanel   = document.getElementById('filesPanel');
+    const filesPanelBody    = document.getElementById('filesPanelBody');
+    const filesPanelSummary = document.getElementById('filesPanelSummary');
+    const fpKeepBtn    = document.getElementById('fpKeepBtn');
+    const fpUndoBtn    = document.getElementById('fpUndoBtn');
 
     let currentRunId     = null;
     let ws               = null;
     let isRunning        = false;
-    let generatedFiles   = [];
+    let generatedFiles   = [];   // relative paths from file_generated
     let projectDir       = null;
-    let currentIteration = 0;   // incremented each time QA→Dev loop fires
-    let lastAgent        = null; // tracks agent transitions for separators
-    let reviewCardFiles  = [];
-    let reviewCardProjectDir = null;
+    let currentIteration = 0;
+    let lastAgent        = null;
+    // files panel state
+    let fpFiles          = {};   // path → { lines, absPath }
+
+    // Keep All = accept all diffs; Undo All = discard all diffs
+    fpKeepBtn.addEventListener('click', () => {
+      vscode.postMessage({ command: 'acceptAll' });
+      fpKeepBtn.textContent = 'Kept ✓';
+      fpKeepBtn.disabled = true;
+      fpUndoBtn.disabled = true;
+    });
+    fpUndoBtn.addEventListener('click', () => {
+      vscode.postMessage({ command: 'discardAll' });
+      fpUndoBtn.textContent = 'Undone';
+      fpUndoBtn.disabled = true;
+      fpKeepBtn.disabled = true;
+    });
+
+    // ── Files panel helpers ───────────────────────────────────────
+    function resetFilesPanel() {
+      fpFiles = {};
+      filesPanelBody.innerHTML = '';
+      filesPanelSummary.textContent = '';
+      fpKeepBtn.textContent = 'Keep All';
+      fpKeepBtn.disabled = false;
+      fpUndoBtn.textContent = 'Undo All';
+      fpUndoBtn.disabled = false;
+      filesPanel.classList.remove('visible');
+      const v = filesPanel.querySelector('.fp-verdict');
+      if (v) v.remove();
+    }
+
+    function addFileToPanel(relPath, content) {
+      const lines = content ? content.split('\\n').length : 0;
+      fpFiles[relPath] = lines;
+
+      // Remove existing row for this path (revision update)
+      const existing = filesPanelBody.querySelector('[data-path="' + CSS.escape(relPath) + '"]');
+      if (existing) existing.remove();
+
+      const ext = (relPath.split('.').pop() || 'file').toLowerCase();
+      const name = relPath.split('/').pop() || relPath;
+
+      const row = document.createElement('div');
+      row.className = 'fp-row';
+      row.dataset.path = relPath;
+      row.innerHTML =
+        '<span class="fp-ext">' + escHtml(ext) + '</span>' +
+        '<span class="fp-name" title="' + escHtml(relPath) + '">' + escHtml(name) + '</span>' +
+        '<span class="fp-lines">+' + lines + '</span>' +
+        '<span class="fp-action fp-keep" title="Accept this file">✓</span>' +
+        '<span class="fp-action fp-undo" title="Discard this file">✗</span>';
+
+      // Click on filename → open diff
+      row.querySelector('.fp-name').addEventListener('click', (e) => {
+        e.stopPropagation();
+        vscode.postMessage({ command: 'openProposedChange', filePath: relPath, fileContent: content });
+      });
+      // ✓ = accept this file's diff
+      row.querySelector('.fp-keep').addEventListener('click', (e) => {
+        e.stopPropagation();
+        vscode.postMessage({ command: 'acceptFile', filePath: relPath });
+        row.classList.add('fp-resolved', 'fp-kept');
+        row.querySelector('.fp-keep').textContent = '✓';
+        row.querySelector('.fp-undo').style.display = 'none';
+      });
+      // ✗ = discard this file's diff
+      row.querySelector('.fp-undo').addEventListener('click', (e) => {
+        e.stopPropagation();
+        vscode.postMessage({ command: 'discardFile', filePath: relPath });
+        row.classList.add('fp-resolved', 'fp-discarded');
+        row.querySelector('.fp-undo').textContent = '✗';
+        row.querySelector('.fp-keep').style.display = 'none';
+      });
+
+      filesPanelBody.appendChild(row);
+
+      const count = Object.keys(fpFiles).length;
+      const totalLines = Object.values(fpFiles).reduce(function(a, b) { return a + b; }, 0);
+      filesPanelSummary.textContent = count + ' file' + (count !== 1 ? 's' : '') + '  +' + totalLines;
+      filesPanel.classList.add('visible');
+    }
+
+    function setFilesPanelVerdict(qaPassed) {
+      let v = filesPanel.querySelector('.fp-verdict');
+      if (!v) {
+        v = document.createElement('div');
+        filesPanel.appendChild(v);
+      }
+      v.className = 'fp-verdict ' + (qaPassed ? 'pass' : 'fail');
+      v.textContent = qaPassed ? '✓ QA passed' : '✗ QA did not pass';
+    }
 
     // ── Progress helpers ─────────────────────────────────────────
     function setProgressIndeterminate() {
