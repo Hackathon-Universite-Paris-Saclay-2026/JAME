@@ -34,8 +34,40 @@
       {
         "command": "jameWorkflow.focus",
         "title": "JAME Workflow: Focus Agent Panel"
+      },
+      {
+        "command": "jameWorkflow.acceptFile",
+        "title": "Accept Changes",
+        "icon": "$(check)"
+      },
+      {
+        "command": "jameWorkflow.discardFile",
+        "title": "Discard Changes",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "jameWorkflow.acceptAll",
+        "title": "JAME: Accept All Proposed Changes"
+      },
+      {
+        "command": "jameWorkflow.discardAll",
+        "title": "JAME: Discard All Proposed Changes"
       }
     ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "jameWorkflow.acceptFile",
+          "when": "resourceScheme == jame-proposed",
+          "group": "navigation"
+        },
+        {
+          "command": "jameWorkflow.discardFile",
+          "when": "resourceScheme == jame-proposed",
+          "group": "navigation"
+        }
+      ]
+    },
     "configuration": {
       "title": "JAME Workflow",
       "properties": {
