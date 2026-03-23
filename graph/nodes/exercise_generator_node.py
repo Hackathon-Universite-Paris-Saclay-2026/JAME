@@ -83,7 +83,7 @@ def _file_summary(files: list[CodeFile]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def stripper_node(state: AgentState) -> dict:
+def exercise_generator_node(state: AgentState) -> dict:
     """Analyze golden solution and produce exercise files with TODOs.
 
     Args:
