@@ -20,10 +20,11 @@ def _pydantic_encoder(obj: Any) -> Any:
         return obj.model_dump()
     return str(obj)
 
+
 from cancel_token import CancelToken, RunCancelledError, set_current_token
 from graph.graph import build_graph
 from graph.nodes.validator_node import validate_submission as _validate
-from graph.state import AgentState, CodeFile
+from graph.state import AgentState
 from utils.node import save_artifacts
 
 from .job_store import InMemoryRunStore
@@ -360,7 +361,11 @@ class OrchestratorService:
                         exercise_paths: list[str] = []
                         for ef in exercise_files:
                             p = ef["path"] if isinstance(ef, dict) else ef.path
-                            c = ef["content"] if isinstance(ef, dict) else ef.content
+                            c = (
+                                ef["content"]
+                                if isinstance(ef, dict)
+                                else ef.content
+                            )
                             if p:
                                 dest = exercise_dir / p
                                 dest.parent.mkdir(parents=True, exist_ok=True)
@@ -373,7 +378,11 @@ class OrchestratorService:
                         golden_dir.mkdir(parents=True, exist_ok=True)
                         for gf in golden_files_state:
                             p = gf["path"] if isinstance(gf, dict) else gf.path
-                            c = gf["content"] if isinstance(gf, dict) else gf.content
+                            c = (
+                                gf["content"]
+                                if isinstance(gf, dict)
+                                else gf.content
+                            )
                             if p:
                                 dest = golden_dir / p
                                 dest.parent.mkdir(parents=True, exist_ok=True)
@@ -459,13 +468,17 @@ class OrchestratorService:
                 "output_dir": str((run_output_dir / "output").resolve()),
                 "project_dir": str(project_dir),
                 "generated_files": generated_files,
-                "state": json.loads(json.dumps(final_state, default=_pydantic_encoder)),
+                "state": json.loads(
+                    json.dumps(final_state, default=_pydantic_encoder)
+                ),
             }
 
             self.store.set_result(run_id, result)
 
             # Learning mode: pause and wait for junior's submission
-            if final_state.get("learning_mode") and final_state.get("exercise_files"):
+            if final_state.get("learning_mode") and final_state.get(
+                "exercise_files"
+            ):
                 self.store.update_status(run_id, RunStatus.AWAITING_SUBMISSION)
                 await self._emit(
                     run_id,

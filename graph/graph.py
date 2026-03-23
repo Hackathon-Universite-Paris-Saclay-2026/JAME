@@ -72,9 +72,9 @@ def build_graph() -> StateGraph:
     workflow.add_edge("architect", "developer")
     workflow.add_edge("developer", "devops")  # QA bypassed
     workflow.add_conditional_edges(
-         "qa",
-         _should_retry_or_continue,
-         {"developer": "developer", "devops": "devops"},
+        "qa",
+        _should_retry_or_continue,
+        {"developer": "developer", "devops": "devops"},
     )
     workflow.add_conditional_edges(
         "devops",

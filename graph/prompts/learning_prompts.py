@@ -2,6 +2,7 @@
 
 from graph.prompts import load_prompts as _load
 
+
 _p = _load("learning_mode")
 
 ANALYZE_PROMPT: str = _p["stripper"]["analyze"]

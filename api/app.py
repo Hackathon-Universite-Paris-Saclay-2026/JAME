@@ -101,7 +101,9 @@ def get_exercise(run_id: str) -> ExerciseResponse:
     """
     record = service.store.get_run(run_id)
     if record is None:
-        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found.")
+        raise HTTPException(
+            status_code=404, detail=f"Run '{run_id}' not found."
+        )
     state = record.result.get("state", {})
     exercise_files = state.get("exercise_files", [])
     learning_objectives = state.get("learning_objectives", [])
@@ -118,14 +120,18 @@ def get_exercise(run_id: str) -> ExerciseResponse:
 
 
 @app.post("/runs/{run_id}/submit", response_model=SubmitResponse)
-async def submit_solution(run_id: str, request: SubmitRequest) -> SubmitResponse:
+async def submit_solution(
+    run_id: str, request: SubmitRequest
+) -> SubmitResponse:
     """Submit the junior's implementation for AI review.
 
     Triggers the Validator agent and returns structured feedback + optional hint.
     """
     record = service.store.get_run(run_id)
     if record is None:
-        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found.")
+        raise HTTPException(
+            status_code=404, detail=f"Run '{run_id}' not found."
+        )
     result = await service.validate_submission(run_id, request.files)
     return SubmitResponse(**result)
 
@@ -135,7 +141,9 @@ async def get_hint(run_id: str) -> dict:
     """Unlock and return the next progressive hint for the current exercise."""
     record = service.store.get_run(run_id)
     if record is None:
-        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found.")
+        raise HTTPException(
+            status_code=404, detail=f"Run '{run_id}' not found."
+        )
     hint = await service.get_next_hint(run_id)
     if hint is None:
         raise HTTPException(status_code=404, detail="No more hints available.")

@@ -67,7 +67,11 @@ def _snippet_for_objective(objective: str, golden_files: list[CodeFile]) -> str:
                 if in_fn:
                     snippet_lines.append(line)
                     # Stop at next top-level definition (indent 0) after start
-                    if len(snippet_lines) > 1 and line and not line[0].isspace():
+                    if (
+                        len(snippet_lines) > 1
+                        and line
+                        and not line[0].isspace()
+                    ):
                         break
             if snippet_lines:
                 return "\n".join(snippet_lines[:30])  # cap at 30 lines
@@ -118,10 +122,12 @@ def validate_submission(
         f"JUNIOR SUBMISSION:\n{submission_text}"
     )
 
-    response = llm.invoke([
-        SystemMessage(content=REVIEW_PROMPT),
-        HumanMessage(content=review_prompt),
-    ])
+    response = llm.invoke(
+        [
+            SystemMessage(content=REVIEW_PROMPT),
+            HumanMessage(content=review_prompt),
+        ]
+    )
     _, raw = strip_thinking(response.content)
     result = parse_json_safe(raw, fallback={})
 
@@ -166,13 +172,17 @@ def validate_submission(
             "",
         )
 
-        hint_response = llm.invoke([
-            HumanMessage(content=hint_prompt_template.format(
-                objective=first_missing,
-                current_code=current_code[:2000],
-                golden_snippet=golden_snippet,
-            )),
-        ])
+        hint_response = llm.invoke(
+            [
+                HumanMessage(
+                    content=hint_prompt_template.format(
+                        objective=first_missing,
+                        current_code=current_code[:2000],
+                        golden_snippet=golden_snippet,
+                    )
+                ),
+            ]
+        )
         _, hint_text = strip_thinking(hint_response.content)
         print(f"[HINT] Level {new_hint_level} hint generated.")
 
@@ -180,7 +190,9 @@ def validate_submission(
     if strengths:
         feedback += "\n\nStrengths:\n" + "\n".join(f"• {s}" for s in strengths)
     if improvements:
-        feedback += "\n\nTo improve:\n" + "\n".join(f"• {i}" for i in improvements)
+        feedback += "\n\nTo improve:\n" + "\n".join(
+            f"• {i}" for i in improvements
+        )
 
     return {
         "passed": passed,

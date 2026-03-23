@@ -14,8 +14,6 @@ Files never stripped: config, tests, frontend, entry points.
 
 from __future__ import annotations
 
-import json
-
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from cancel_token import raise_if_cancelled
@@ -23,6 +21,7 @@ from graph.prompts.learning_prompts import ANALYZE_PROMPT, STRIP_PROMPT
 from graph.state import AgentState, CodeFile
 from integrations.cortex import get_cortex_llm
 from utils.node import parse_json_safe, strip_thinking
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -112,19 +111,23 @@ def stripper_node(state: AgentState) -> dict:
     print("=" * 60)
     print("[ANALYZE] Identifying business logic blocks to strip …")
 
-    logs.append({
-        "agent": "stripper",
-        "phase": "plan",
-        "content": "[ANALYZE] Scanning generated files for non-trivial business logic …",
-    })
+    logs.append(
+        {
+            "agent": "stripper",
+            "phase": "plan",
+            "content": "[ANALYZE] Scanning generated files for non-trivial business logic …",
+        }
+    )
 
     strippable = [f for f in code_files if not _should_skip(f.path)]
     manifest = _file_summary(strippable)
 
-    analyze_response = llm.invoke([
-        SystemMessage(content=ANALYZE_PROMPT),
-        HumanMessage(content=f"Analyse these source files:\n\n{manifest}"),
-    ])
+    analyze_response = llm.invoke(
+        [
+            SystemMessage(content=ANALYZE_PROMPT),
+            HumanMessage(content=f"Analyse these source files:\n\n{manifest}"),
+        ]
+    )
     raise_if_cancelled()
 
     _, analyze_raw = strip_thinking(analyze_response.content)
@@ -137,11 +140,13 @@ def stripper_node(state: AgentState) -> dict:
     analysis: list[dict] = parsed if isinstance(parsed, list) else []
 
     print(f"[ANALYZE] {len(analysis)} file(s) with learning blocks identified.")
-    logs.append({
-        "agent": "stripper",
-        "phase": "reason",
-        "content": f"[ANALYZE] {len(analysis)} file(s) selected for stripping.",
-    })
+    logs.append(
+        {
+            "agent": "stripper",
+            "phase": "reason",
+            "content": f"[ANALYZE] {len(analysis)} file(s) selected for stripping.",
+        }
+    )
 
     # ── [STRIP] Replace blocks with typed stubs ──────────────────────────────
     exercise_files: list[CodeFile] = []
@@ -167,11 +172,13 @@ def stripper_node(state: AgentState) -> dict:
             f"- {b['function_name']}: {b['objective']}" for b in blocks
         )
         print(f"[STRIP] {path} ({len(blocks)} block(s)) …")
-        logs.append({
-            "agent": "stripper",
-            "phase": "act",
-            "content": f"[STRIP] Stripping {path} → {len(blocks)} TODO block(s).",
-        })
+        logs.append(
+            {
+                "agent": "stripper",
+                "phase": "act",
+                "content": f"[STRIP] Stripping {path} → {len(blocks)} TODO block(s).",
+            }
+        )
 
         strip_prompt = (
             f"File to strip: {path}\n\n"
@@ -179,10 +186,12 @@ def stripper_node(state: AgentState) -> dict:
             f"Original file content:\n{original.content}"
         )
 
-        strip_response = llm.invoke([
-            SystemMessage(content=STRIP_PROMPT),
-            HumanMessage(content=strip_prompt),
-        ])
+        strip_response = llm.invoke(
+            [
+                SystemMessage(content=STRIP_PROMPT),
+                HumanMessage(content=strip_prompt),
+            ]
+        )
         raise_if_cancelled()
 
         _, stripped_content = strip_thinking(strip_response.content)
@@ -190,13 +199,17 @@ def stripper_node(state: AgentState) -> dict:
         stripped_content = stripped_content.strip()
         if stripped_content.startswith("```"):
             lines = stripped_content.splitlines()
-            stripped_content = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
+            stripped_content = "\n".join(
+                lines[1:-1] if lines[-1] == "```" else lines[1:]
+            )
 
-        exercise_files.append(CodeFile(
-            path=original.path,
-            content=stripped_content,
-            language=original.language,
-        ))
+        exercise_files.append(
+            CodeFile(
+                path=original.path,
+                content=stripped_content,
+                language=original.language,
+            )
+        )
 
         # Collect objectives and hints from this file's blocks
         for block in blocks:
@@ -205,9 +218,7 @@ def stripper_node(state: AgentState) -> dict:
             fn = block.get("function_name", "")
             if obj:
                 learning_objectives.append(f"{path}::{fn} — {obj}")
-                hints.append(
-                    f"[{fn}] {reason}. Focus on: {obj}"
-                )
+                hints.append(f"[{fn}] {reason}. Focus on: {obj}")
 
     # Files that were not stripped: carry them over as-is into exercise_files
     stripped_paths = {f.path for f in exercise_files}
@@ -217,14 +228,16 @@ def stripper_node(state: AgentState) -> dict:
 
     print(f"[PACKAGE] {len(exercise_files)} exercise file(s) ready.")
     print(f"[PACKAGE] {len(learning_objectives)} learning objective(s).")
-    logs.append({
-        "agent": "stripper",
-        "phase": "reason",
-        "content": (
-            f"[PACKAGE] Exercise ready — {len(learning_objectives)} objective(s) "
-            f"across {len([f for f in exercise_files if not _should_skip(f.path)])} file(s)."
-        ),
-    })
+    logs.append(
+        {
+            "agent": "stripper",
+            "phase": "reason",
+            "content": (
+                f"[PACKAGE] Exercise ready — {len(learning_objectives)} objective(s) "
+                f"across {len([f for f in exercise_files if not _should_skip(f.path)])} file(s)."
+            ),
+        }
+    )
 
     return {
         "golden_files": golden_files,
