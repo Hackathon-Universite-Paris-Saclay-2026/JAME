@@ -17,6 +17,7 @@ class RunStatus(str, Enum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    AWAITING_SUBMISSION = "awaiting_submission"
 
 
 class RunCreateRequest(BaseModel):
@@ -32,6 +33,38 @@ class RunCreateRequest(BaseModel):
         le=10,
         description="Maximum QA→Developer retry loops before forcing completion.",
     )
+    learning_mode: bool = Field(
+        default=False,
+        description="Enable Learning Mode: generates exercise files with TODOs for junior developers.",
+    )
+
+
+class SubmitRequest(BaseModel):
+    """Request body for POST /runs/{run_id}/submit."""
+
+    files: list[dict[str, Any]] = Field(
+        description="List of submitted files: [{path, content, language}]"
+    )
+
+
+class SubmitResponse(BaseModel):
+    """Response body for POST /runs/{run_id}/submit."""
+
+    passed: bool
+    score: int
+    feedback: str
+    per_objective: list[dict[str, Any]] = Field(default_factory=list)
+    hint: str | None = None
+    hint_level: int = 0
+
+
+class ExerciseResponse(BaseModel):
+    """Response body for GET /runs/{run_id}/exercise."""
+
+    run_id: str
+    exercise_files: list[dict[str, Any]]
+    learning_objectives: list[str]
+    hints_available: int
 
 
 class RunCreateResponse(BaseModel):
