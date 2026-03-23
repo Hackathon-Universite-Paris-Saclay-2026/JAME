@@ -1328,8 +1328,26 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
 
     // ── Utilities ─────────────────────────────────────────────────
     function escHtml(s) {
-      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+      return String(s)
+        .replace(new RegExp('&', 'g'), '&amp;')
+        .replace(new RegExp('<', 'g'), '&lt;')
+        .replace(new RegExp('>', 'g'), '&gt;')
+        .replace(new RegExp('"', 'g'), '&quot;');
     }
+
+    // Lightweight markdown renderer (no external lib — webview is sandboxed)
+    function renderMd(text) {
+      if (!text) return '';
+      let s = escHtml(String(text));
+      // Bold: use [*][*] so * is inside a character class and not a quantifier
+      s = s.replace(new RegExp('[*][*](.+?)[*][*]', 'g'), '<strong>$1</strong>');
+      // List items
+      s = s.replace(new RegExp('^- (.+)$', 'gm'), '<li style="margin-left:12px;list-style:disc">$1</li>');
+      // Newlines
+      s = s.replace(new RegExp('[\\n]', 'g'), '<br>');
+      return s;
+    }
+
     function removeEmpty() { const e = document.getElementById('emptyState'); if (e) e.remove(); }
     function scrollFeed()  { feed.scrollTop = feed.scrollHeight; }
 
@@ -1354,57 +1372,131 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
       scrollFeed();
     }
 
-    // ── Timeline row ──────────────────────────────────────────────
-    function badgeClass(agentName) {
+    // ── Agent log rows ────────────────────────────────────────────
+    // Short display labels (keyed by lowercase)
+    const AGENT_SHORT = {
+      'architect':          'ARCH',
+      'developer':          'DEV',
+      'delivery':           'DEV',
+      'delivery_engineer':  'DEV',
+      'quality_engineer':   'QA',
+      'qa':                 'QA',
+      'devops':             'OPS',
+      'exercise_generator': 'EXC',
+      'exercise':           'EXC',
+      'orchestrator':       'SYS',
+      'system':             'SYS',
+    };
+
+    function acClass(agentName) {
       const n = (agentName || '').toLowerCase();
-      if (n.includes('architect'))       return 'badge-architect';
-      if (n.includes('developer') || n.includes('dev')) return 'badge-developer';
-      if (n.includes('delivery'))        return 'badge-delivery';
-      if (n.includes('quality') || n.includes('qa'))    return 'badge-qa';
-      return 'badge-system';
+      if (n.includes('architect'))                                                    return 'ac-architect';
+      if (n.includes('developer') || n.includes('devop') || n.includes('delivery'))  return 'ac-developer';
+      if (n.includes('quality') || n.includes('qa'))                                 return 'ac-qa';
+      return 'ac-system';
     }
 
-    function addTlRow(agentName, text, thinking) {
+    function phaseClass(phase) {
+      if (!phase) return '';
+      // Take only the first segment of compound phases like "CONSTRUCTION/build-and-test"
+      const p = String(phase).toLowerCase().split('/')[0].replace(new RegExp('[^a-z_]', 'g'), '_');
+      const known = ['plan','act','reason','design','validate','self_critique',
+                     'classify','interrogation','construction','learning'];
+      return 'phase-' + (known.indexOf(p) >= 0 ? p : 'other');
+    }
+
+    // Canonical short labels for phase pills
+    const PHASE_LABEL = {
+      'plan':          'PLAN',
+      'act':           'ACT',
+      'reason':        'REASON',
+      'design':        'DESIGN',
+      'validate':      'VALIDATE',
+      'self_critique': 'CRITIQUE',
+      'classify':      'CLASSIFY',
+      'interrogation': 'INTERROGATE',
+      'construction':  'BUILD',
+      'learning':      'LEARN',
+    };
+
+    // Short display label for a phase (shown in pill)
+    function phaseLabel(phase) {
+      if (!phase) return '';
+      const key = String(phase).toLowerCase().split('/')[0].replace(new RegExp('[^a-z_]', 'g'), '_');
+      if (PHASE_LABEL[key]) return PHASE_LABEL[key];
+      // Compound phase sub-label: "CONSTRUCTION/build-and-test" → "BUILD AND TEST"
+      const parts = String(phase).toUpperCase().split('/');
+      if (parts.length > 1) return parts[1].replace(new RegExp('-', 'g'), ' ');
+      return parts[0];
+    }
+
+    // Track the last agent class appended so we can dim repeated tags
+    let _lastRowAc = null;
+
+    function addAgentRow(agentName, text, thinking, phase) {
       removeEmpty();
+      const nameLower = (agentName || '').toLowerCase();
+      const rawKey = nameLower.replace(new RegExp('\\s+', 'g'), '_');
+      const ac = acClass(agentName);
+      const shortTag = AGENT_SHORT[nameLower] || AGENT_SHORT[rawKey] || (agentName || 'SYS').slice(0, 4).toUpperCase();
+      const sameAgent = (ac === _lastRowAc);
+      _lastRowAc = ac;
+
+      // ── Row ──────────────────────────────────────────────────────
       const row = document.createElement('div');
-      row.className = 'tl-row fade-in';
+      row.className = 'agent-row ' + ac + (sameAgent ? ' same-agent' : '') + ' fade-in';
 
-      const badge = document.createElement('span');
-      badge.className = 'tl-badge ' + badgeClass(agentName);
-      badge.textContent = agentName || 'System';
+      // Agent tag (fixed-width column)
+      const tag = document.createElement('span');
+      tag.className = 'ar-tag';
+      tag.textContent = shortTag;
+      row.appendChild(tag);
 
-      const textEl = document.createElement('span');
-      textEl.className = 'tl-text';
-      textEl.textContent = text;
-
-      row.appendChild(badge);
-      row.appendChild(textEl);
-
-      if (thinking) {
-        const toggleBtn = document.createElement('button');
-        toggleBtn.className = 'tl-thinking-toggle';
-        toggleBtn.textContent = 'thinking';
-        row.appendChild(toggleBtn);
-
-        const thinkBlock = document.createElement('div');
-        thinkBlock.className = 'thinking-block';
-        thinkBlock.innerHTML =
-          '<div class="thinking-header">Agent Reasoning</div>' +
-          '<div class="thinking-content">' + escHtml(thinking) + '</div>';
-
-        toggleBtn.addEventListener('click', () => {
-          const shown = thinkBlock.classList.toggle('shown');
-          toggleBtn.classList.toggle('open', shown);
-          toggleBtn.textContent = shown ? 'hide' : 'thinking';
-        });
-
-        feed.appendChild(row);
-        feed.appendChild(thinkBlock);
-      } else {
-        feed.appendChild(row);
+      // Phase pill (optional)
+      if (phase) {
+        const pill = document.createElement('span');
+        pill.className = 'ar-phase ' + phaseClass(phase);
+        pill.textContent = phaseLabel(phase);
+        row.appendChild(pill);
       }
 
+      // Message text
+      const msgEl = document.createElement('span');
+      msgEl.className = 'ar-msg';
+      msgEl.innerHTML = renderMd(text);
+      row.appendChild(msgEl);
+
+      // Thinking toggle button (only if thinking exists)
+      let thinkContent = null;
+      if (thinking) {
+        const btn = document.createElement('span');
+        btn.className = 'ar-think-btn';
+        btn.textContent = '▶ thinking';
+        row.appendChild(btn);
+
+        thinkContent = document.createElement('div');
+        thinkContent.className = 'ar-think-content';
+        thinkContent.textContent = thinking;
+
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          thinkContent.classList.toggle('shown');
+          btn.textContent = thinkContent.classList.contains('shown') ? '▼ thinking' : '▶ thinking';
+        });
+      }
+
+      feed.appendChild(row);
+      if (thinkContent) feed.appendChild(thinkContent);
+
       scrollFeed();
+    }
+
+    // Shims for any remaining calls using old names
+    function addAgentCard(agentName, text, thinking, phase) {
+      addAgentRow(agentName, text, thinking, phase);
+    }
+    function addTlRow(agentName, text, thinking, phase) {
+      addAgentRow(agentName, text, thinking, phase);
     }
 
     // ── File diff row ─────────────────────────────────────────────
@@ -1467,19 +1559,45 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
       const row = document.createElement('div');
       row.className = 'actions-row';
 
-      // Save to workspace
-      const saveBtn = document.createElement('button');
-      saveBtn.className = 'btn btn-primary';
-      saveBtn.textContent = 'Save to workspace';
-      saveBtn.addEventListener('click', () => {
-        vscode.postMessage({ command: 'saveFiles', files, projectDir: pDir });
-        saveBtn.textContent = 'Saved';
-        saveBtn.disabled = true;
+      // Accept All proposed changes
+      const acceptAllBtn = document.createElement('button');
+      acceptAllBtn.className = 'btn btn-success';
+      acceptAllBtn.textContent = 'Accept All';
+      acceptAllBtn.title = 'Write all proposed files to workspace';
+      acceptAllBtn.addEventListener('click', () => {
+        vscode.postMessage({ command: 'acceptAll' });
+        acceptAllBtn.textContent = 'Accepted';
+        acceptAllBtn.disabled = true;
+        discardAllBtn.disabled = true;
       });
-      row.appendChild(saveBtn);
+      row.appendChild(acceptAllBtn);
 
-      // Open files
+      // Discard All proposed changes
+      const discardAllBtn = document.createElement('button');
+      discardAllBtn.className = 'btn btn-danger';
+      discardAllBtn.textContent = 'Discard All';
+      discardAllBtn.title = 'Discard all proposed changes';
+      discardAllBtn.addEventListener('click', () => {
+        vscode.postMessage({ command: 'discardAll' });
+        discardAllBtn.textContent = 'Discarded';
+        discardAllBtn.disabled = true;
+        acceptAllBtn.disabled = true;
+      });
+      row.appendChild(discardAllBtn);
+
+      // Save to workspace (existing absolute paths fallback)
       if (files.length > 0) {
+        const saveBtn = document.createElement('button');
+        saveBtn.className = 'btn btn-secondary';
+        saveBtn.textContent = 'Save paths';
+        saveBtn.title = 'Copy generated files to workspace using absolute paths';
+        saveBtn.addEventListener('click', () => {
+          vscode.postMessage({ command: 'saveFiles', files, projectDir: pDir });
+          saveBtn.textContent = 'Saved';
+          saveBtn.disabled = true;
+        });
+        row.appendChild(saveBtn);
+
         const openBtn = document.createElement('button');
         openBtn.className = 'btn btn-secondary';
         openBtn.textContent = 'Open in editor';
