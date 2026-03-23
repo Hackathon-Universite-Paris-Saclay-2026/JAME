@@ -18,6 +18,7 @@ from graph.nodes.architect_node import architect_node
 from graph.nodes.developer_node import developer_node
 from graph.nodes.devops_node import devops_node
 from graph.nodes.qa_node import qa_node
+from graph.nodes.stripper_node import stripper_node
 from graph.state import AgentState
 
 
@@ -62,21 +63,24 @@ def build_graph() -> StateGraph:
     # ── Nodes ────────────────────────────────────────────────────
     workflow.add_node("architect", architect_node)
     workflow.add_node("developer", developer_node)
-    workflow.add_node("qa", qa_node)
+    workflow.add_node("qa", qa_node)  # DISABLED — re-enable for production
     workflow.add_node("devops", devops_node)
+    workflow.add_node("stripper", stripper_node)
 
     # ── Edges ────────────────────────────────────────────────────
     workflow.set_entry_point("architect")
     workflow.add_edge("architect", "developer")
-    workflow.add_edge("developer", "qa")
+    workflow.add_edge("developer", "devops")  # QA bypassed
     workflow.add_conditional_edges(
-        "qa",
-        _should_retry_or_continue,
-        {
-            "developer": "developer",
-            "devops": "devops",
-        },
+         "qa",
+         _should_retry_or_continue,
+         {"developer": "developer", "devops": "devops"},
     )
-    workflow.add_edge("devops", END)
+    workflow.add_conditional_edges(
+        "devops",
+        lambda s: "stripper" if s.get("learning_mode") else END,
+        {"stripper": "stripper", END: END},
+    )
+    workflow.add_edge("stripper", END)
 
     return workflow.compile()

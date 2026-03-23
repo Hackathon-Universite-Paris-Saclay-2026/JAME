@@ -11,9 +11,19 @@ import traceback
 from typing import Any
 import uuid
 
+from pydantic import BaseModel
+
+
+def _pydantic_encoder(obj: Any) -> Any:
+    """JSON encoder that serialises Pydantic models as dicts instead of str()."""
+    if isinstance(obj, BaseModel):
+        return obj.model_dump()
+    return str(obj)
+
 from cancel_token import CancelToken, RunCancelledError, set_current_token
 from graph.graph import build_graph
-from graph.state import AgentState
+from graph.nodes.validator_node import validate_submission as _validate
+from graph.state import AgentState, CodeFile
 from utils.node import save_artifacts
 
 from .job_store import InMemoryRunStore
@@ -44,6 +54,86 @@ class OrchestratorService:
     def cancel_run(self, run_id: str) -> bool:
         """Request cancellation of a running pipeline."""
         return self.store.cancel_run(run_id)
+
+    async def validate_submission(
+        self, run_id: str, submitted_files: list[dict]
+    ) -> dict:
+        """Run the Validator agent on the junior's submission.
+
+        Args:
+            run_id: ID of the learning mode run.
+            submitted_files: Files submitted by the junior developer.
+
+        Returns:
+            Dict with keys: passed, score, feedback, per_objective, hint, hint_level.
+        """
+        record = self.store.get_run(run_id)
+        if record is None:
+            return {"passed": False, "score": 0, "feedback": "Run not found."}
+
+        state = record.result.get("state", {})
+        golden_files = state.get("golden_files", [])
+        learning_objectives = state.get("learning_objectives", [])
+        hints = state.get("hints", [])
+        hint_level = state.get("hint_level", 0)
+
+        result = await asyncio.to_thread(
+            _validate,
+            submitted_files,
+            golden_files,
+            learning_objectives,
+            hints,
+            hint_level,
+        )
+
+        # Persist updated hint_level into state
+        state["hint_level"] = result.get("hint_level", hint_level)
+        state["validation_feedback"] = result.get("feedback", "")
+        record.result["state"] = state
+
+        if result.get("passed"):
+            self.store.update_status(run_id, RunStatus.SUCCEEDED)
+            await self._emit(
+                run_id,
+                "run_completed",
+                "Exercise validated — well done!",
+                payload={"score": result.get("score", 0)},
+            )
+
+        return result
+
+    async def get_next_hint(self, run_id: str) -> str | None:
+        """Unlock and return the next progressive hint.
+
+        Args:
+            run_id: ID of the learning mode run.
+
+        Returns:
+            Hint text, or None if all hints are exhausted.
+        """
+        record = self.store.get_run(run_id)
+        if record is None:
+            return None
+
+        state = record.result.get("state", {})
+        hints: list[str] = state.get("hints", [])
+        hint_level: int = state.get("hint_level", 0)
+
+        if hint_level >= len(hints):
+            return None
+
+        hint = hints[hint_level]
+        state["hint_level"] = hint_level + 1
+        record.result["state"] = state
+
+        await self._emit(
+            run_id,
+            "hint_unlocked",
+            f"Hint {hint_level + 1}/{len(hints)} unlocked.",
+            agent="stripper",
+            payload={"hint": hint, "hint_level": hint_level + 1},
+        )
+        return hint
 
     async def _emit(
         self,
@@ -111,6 +201,14 @@ class OrchestratorService:
             "iteration": 0,
             "max_iterations": request.max_iterations,
             "reasoning_logs": [],
+            # Learning mode fields
+            "learning_mode": request.learning_mode,
+            "golden_files": [],
+            "exercise_files": [],
+            "learning_objectives": [],
+            "hints": [],
+            "hint_level": 0,
+            "validation_feedback": "",
         }
 
         run_output_dir = self.output_root / run_id
@@ -251,6 +349,60 @@ class OrchestratorService:
                             },
                         )
 
+                    # After stripper: save exercise files to disk + emit event
+                    if node_name == "stripper":
+                        exercise_files = node_update.get("exercise_files", [])
+                        objectives = node_update.get("learning_objectives", [])
+
+                        # Save exercise files under runs/{run_id}/exercise/
+                        exercise_dir = (run_output_dir / "exercise").resolve()
+                        exercise_dir.mkdir(parents=True, exist_ok=True)
+                        exercise_paths: list[str] = []
+                        for ef in exercise_files:
+                            p = ef["path"] if isinstance(ef, dict) else ef.path
+                            c = ef["content"] if isinstance(ef, dict) else ef.content
+                            if p:
+                                dest = exercise_dir / p
+                                dest.parent.mkdir(parents=True, exist_ok=True)
+                                dest.write_text(c, encoding="utf-8")
+                                exercise_paths.append(str(dest))
+
+                        # Save golden solution under runs/{run_id}/golden/
+                        golden_files_state = node_update.get("golden_files", [])
+                        golden_dir = (run_output_dir / "golden").resolve()
+                        golden_dir.mkdir(parents=True, exist_ok=True)
+                        for gf in golden_files_state:
+                            p = gf["path"] if isinstance(gf, dict) else gf.path
+                            c = gf["content"] if isinstance(gf, dict) else gf.content
+                            if p:
+                                dest = golden_dir / p
+                                dest.parent.mkdir(parents=True, exist_ok=True)
+                                dest.write_text(c, encoding="utf-8")
+
+                        serialized = [
+                            f if isinstance(f, dict) else f.model_dump()
+                            for f in exercise_files
+                        ]
+                        await self._emit(
+                            run_id=run_id,
+                            event="exercise_ready",
+                            message=(
+                                f"Learning exercise ready — "
+                                f"{len(objectives)} objective(s) to implement."
+                            ),
+                            agent="stripper",
+                            phase="LEARNING",
+                            payload={
+                                "exercise_dir": str(exercise_dir),
+                                "exercise_files": serialized,
+                                "exercise_paths": exercise_paths,
+                                "learning_objectives": objectives,
+                                "hints_available": len(
+                                    node_update.get("hints", [])
+                                ),
+                            },
+                        )
+
                     # After devops: emit CI/CD file events
                     if node_name == "devops":
                         for file_list, phase_label in [
@@ -307,10 +459,27 @@ class OrchestratorService:
                 "output_dir": str((run_output_dir / "output").resolve()),
                 "project_dir": str(project_dir),
                 "generated_files": generated_files,
-                "state": json.loads(json.dumps(final_state, default=str)),
+                "state": json.loads(json.dumps(final_state, default=_pydantic_encoder)),
             }
 
             self.store.set_result(run_id, result)
+
+            # Learning mode: pause and wait for junior's submission
+            if final_state.get("learning_mode") and final_state.get("exercise_files"):
+                self.store.update_status(run_id, RunStatus.AWAITING_SUBMISSION)
+                await self._emit(
+                    run_id,
+                    "awaiting_submission",
+                    "Pipeline complete — waiting for your implementation.",
+                    payload={
+                        "learning_objectives": final_state.get(
+                            "learning_objectives", []
+                        ),
+                        "hints_available": len(final_state.get("hints", [])),
+                    },
+                )
+                return
+
             self.store.update_status(run_id, RunStatus.SUCCEEDED)
             await self._emit(
                 run_id,

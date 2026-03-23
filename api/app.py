@@ -7,7 +7,14 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
-from .models import RunCreateRequest, RunCreateResponse, RunStatusResponse
+from .models import (
+    ExerciseResponse,
+    RunCreateRequest,
+    RunCreateResponse,
+    RunStatusResponse,
+    SubmitRequest,
+    SubmitResponse,
+)
 from .service import OrchestratorService
 
 
@@ -84,6 +91,55 @@ async def cancel_run(run_id: str) -> dict[str, str]:
             status_code=409, detail="Run is not in a cancellable state."
         )
     return {"status": "cancellation_requested"}
+
+
+@app.get("/runs/{run_id}/exercise", response_model=ExerciseResponse)
+def get_exercise(run_id: str) -> ExerciseResponse:
+    """Return the exercise files (with TODOs) for a learning mode run.
+
+    Only available when status is ``awaiting_submission``.
+    """
+    record = service.store.get_run(run_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found.")
+    state = record.result.get("state", {})
+    exercise_files = state.get("exercise_files", [])
+    learning_objectives = state.get("learning_objectives", [])
+    hints = state.get("hints", [])
+    serialized = [
+        f if isinstance(f, dict) else f.model_dump() for f in exercise_files
+    ]
+    return ExerciseResponse(
+        run_id=run_id,
+        exercise_files=serialized,
+        learning_objectives=learning_objectives,
+        hints_available=len(hints),
+    )
+
+
+@app.post("/runs/{run_id}/submit", response_model=SubmitResponse)
+async def submit_solution(run_id: str, request: SubmitRequest) -> SubmitResponse:
+    """Submit the junior's implementation for AI review.
+
+    Triggers the Validator agent and returns structured feedback + optional hint.
+    """
+    record = service.store.get_run(run_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found.")
+    result = await service.validate_submission(run_id, request.files)
+    return SubmitResponse(**result)
+
+
+@app.get("/runs/{run_id}/hint")
+async def get_hint(run_id: str) -> dict:
+    """Unlock and return the next progressive hint for the current exercise."""
+    record = service.store.get_run(run_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found.")
+    hint = await service.get_next_hint(run_id)
+    if hint is None:
+        raise HTTPException(status_code=404, detail="No more hints available.")
+    return {"hint": hint}
 
 
 @app.websocket("/ws/runs/{run_id}")
