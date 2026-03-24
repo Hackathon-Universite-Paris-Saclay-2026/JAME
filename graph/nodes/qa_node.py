@@ -357,6 +357,14 @@ def qa_node(state: AgentState) -> dict:
     # already give those calls sufficient context — implement as a follow-up if
     # verdict quality degrades on large codebases (10+ files).
     reasoning_logs = []
+    _emit = state.get("emit_callback")
+
+    def _log(entry: dict) -> None:
+        reasoning_logs.append(entry)
+        if _emit:
+            _emit(entry)
+
+    _log({"agent": "qa", "phase": "plan", "content": "QA agent starting…"})
 
     code_files: list[CodeFile] = [_to_code_file(f) for f in raw_files]
 
@@ -382,7 +390,7 @@ def qa_node(state: AgentState) -> dict:
     print(
         f"\n[AI-DLC] Build and Test — iteration {iteration + 1}/{max_iterations} — {len(code_files)} file(s)"
     )
-    reasoning_logs.append(
+    _log(
         {
             "agent": "qa",
             "phase": "plan",
@@ -392,7 +400,7 @@ def qa_node(state: AgentState) -> dict:
 
     # ── [TRIAGE] ─────────────────────────────────────────────────────────────
     priority_map = _triage(llm, specs, code_files)
-    reasoning_logs.append(
+    _log(
         {
             "agent": "qa",
             "phase": "act",
@@ -420,7 +428,7 @@ def qa_node(state: AgentState) -> dict:
         ]
     )
 
-    reasoning_logs.append(
+    _log(
         {
             "agent": "qa",
             "phase": "act",
@@ -430,7 +438,7 @@ def qa_node(state: AgentState) -> dict:
 
     # ── [CROSS] ──────────────────────────────────────────────────────────────
     cross_file_result = _cross_file_check(llm, specs, per_file_results)
-    reasoning_logs.append(
+    _log(
         {
             "agent": "qa",
             "phase": "act",
@@ -458,7 +466,7 @@ def qa_node(state: AgentState) -> dict:
             ],
             next_stage="Pipeline complete",
         )
-        reasoning_logs.append(
+        _log(
             {
                 "agent": "qa",
                 "phase": "reason",
@@ -512,7 +520,7 @@ def qa_node(state: AgentState) -> dict:
         fix_feedback_parts.append(f"### Cross-file issues\n{cross_text}")
 
     qa_feedback = "\n\n".join(fix_feedback_parts)
-    reasoning_logs.append(
+    _log(
         {
             "agent": "qa",
             "phase": "act",
@@ -525,7 +533,7 @@ def qa_node(state: AgentState) -> dict:
         print(
             f"[AI-DLC] Fix instructions dispatched to Developer (iteration {iteration + 1}/{max_iterations}).\n"
         )
-        reasoning_logs.append(
+        _log(
             {
                 "agent": "qa",
                 "phase": "reason",
@@ -576,7 +584,7 @@ def qa_node(state: AgentState) -> dict:
     print(verdict_text)
     print("=" * 60 + "\n")
 
-    reasoning_logs.append(
+    _log(
         {
             "agent": "qa",
             "phase": "reason",
