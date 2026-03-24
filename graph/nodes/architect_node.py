@@ -328,7 +328,7 @@ def architect_node(state: AgentState) -> dict:
         )
 
         # Self-critique
-        if not(scope in ("function", "feature")):
+        if scope not in ("function", "feature"):
             critique_issues = _self_critique(llm, specs, diagrams)
             reasoning_logs.append(
                 {
