@@ -187,6 +187,29 @@ class OrchestratorService:
 
         return _clarify_sync
 
+    def _make_emit_fn(
+        self, run_id: str, loop: asyncio.AbstractEventLoop
+    ) -> Callable[[dict], None]:
+        """Return a sync callable that immediately emits an agent_update event from node threads."""
+        svc = self
+
+        def _emit_sync(log: dict) -> None:
+            coro = svc._emit(
+                run_id=run_id,
+                event="agent_update",
+                message=log.get("content", "Agent update"),
+                agent=log.get("agent"),
+                phase=log.get("phase"),
+                payload={
+                    **log,
+                    "thinking": log.get("thinking", ""),
+                    "has_thinking": bool(log.get("thinking", "")),
+                },
+            )
+            asyncio.run_coroutine_threadsafe(coro, loop)
+
+        return _emit_sync
+
     async def _emit(
         self,
         run_id: str,
@@ -243,6 +266,7 @@ class OrchestratorService:
 
         loop = asyncio.get_running_loop()
         clarify_fn = self._make_clarify_fn(run_id, loop)
+        emit_fn = self._make_emit_fn(run_id, loop)
 
         run_output_dir = (self.output_root / run_id).resolve()
         run_output_dir.mkdir(parents=True, exist_ok=True)
@@ -266,6 +290,7 @@ class OrchestratorService:
             "max_iterations": request.max_iterations,
             "mode": request.mode,
             "clarification_callback": clarify_fn,
+            "emit_callback": emit_fn,
             "reasoning_logs": [],
             # Learning mode fields
             "learning_mode": request.learning_mode,
@@ -331,31 +356,6 @@ class OrchestratorService:
                         continue
 
                     final_state = self._merge_state(final_state, node_update)
-
-                    # Stream reasoning log entries as agent_update events
-                    logs = node_update.get("reasoning_logs", [])
-                    if isinstance(logs, list) and logs:
-                        for log in logs:
-                            thinking = log.get("thinking", "")
-                            await self._emit(
-                                run_id=run_id,
-                                event="agent_update",
-                                message=log.get("content", "Agent update"),
-                                agent=log.get("agent") or node_name,
-                                phase=log.get("phase"),
-                                payload={
-                                    **log,
-                                    "thinking": thinking,
-                                    "has_thinking": bool(thinking),
-                                },
-                            )
-                    else:
-                        await self._emit(
-                            run_id=run_id,
-                            event="agent_update",
-                            message=f"{node_name} completed.",
-                            agent=node_name,
-                        )
 
                     # After developer: notify UI of generated files
                     if node_name == "developer" and node_update.get(
