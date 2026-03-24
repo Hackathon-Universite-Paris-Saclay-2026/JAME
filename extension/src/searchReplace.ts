@@ -1,29 +1,17 @@
-/**
- * Pure search/replace engine — computes range-based edit descriptors without
- * touching the workspace.  All mutation happens in a single WorkspaceEdit
- * applied by the caller (extension.ts or a command handler).
- *
- * Features:
- *  - Literal or regex pattern matching
- *  - Case-sensitivity toggle
- *  - Multi-line dot-matches-newline support
- *  - Overlap-safe: earlier matches are not re-matched after a prior replacement
- *  - Returns EditDescriptor[] — one per non-overlapping match found
- */
-
 import * as vscode from "vscode";
+import {
+  buildRegExp as buildCoreRegExp,
+  computeTextEdits,
+  type SearchReplaceOptions,
+} from "./searchReplaceCore";
 
-export interface SearchReplaceOptions {
-  /** The search string or regex source. */
-  pattern: string;
-  /** Replacement string.  Regex back-references ($1, $2, …) supported in regex mode. */
-  replacement: string;
-  /** When true, interpret pattern as a regex; otherwise literal. Default: false. */
-  isRegex?: boolean;
-  /** When true, match is case-sensitive.  Default: true. */
-  caseSensitive?: boolean;
-  /** When true, '.' in regex matches newlines.  Default: false. */
-  multiline?: boolean;
+export type { SearchReplaceOptions } from "./searchReplaceCore";
+
+export interface ResolvedFileForSearch {
+  relativePath: string;
+  content: string;
+  source: "proposed" | "workspace" | "generated" | "not_found";
+  uri?: vscode.Uri;
 }
 
 export interface EditDescriptor {
@@ -37,25 +25,8 @@ export interface EditDescriptor {
   replacementText: string;
 }
 
-/**
- * Build a RegExp from the given options, escaping literal patterns as needed.
- * Throws if the user-supplied regex pattern is syntactically invalid.
- */
 export function buildRegExp(opts: SearchReplaceOptions): RegExp {
-  const source = opts.isRegex ? opts.pattern : escapeRegExp(opts.pattern);
-  const flags = [
-    "g",
-    opts.caseSensitive === false ? "i" : "",
-    opts.multiline ? "s" : "",
-  ]
-    .filter(Boolean)
-    .join("");
-  return new RegExp(source, flags);
-}
-
-/** Escape all RegExp metacharacters in a literal string. */
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return buildCoreRegExp(opts);
 }
 
 /**
@@ -66,37 +37,76 @@ function escapeRegExp(s: string): string {
  */
 export async function computeEditsForDocument(
   uri: vscode.Uri,
-  regex: RegExp,
-  replacement: string
+  opts: SearchReplaceOptions
 ): Promise<EditDescriptor[]> {
   const doc = await vscode.workspace.openTextDocument(uri);
-  const text = doc.getText();
-
-  // Reset lastIndex so the same RegExp object can be reused across documents
-  regex.lastIndex = 0;
-
-  const edits: EditDescriptor[] = [];
-  let match: RegExpExecArray | null;
-
-  while ((match = regex.exec(text)) !== null) {
-    const start = doc.positionAt(match.index);
-    const end = doc.positionAt(match.index + match[0].length);
-    const replacementText = match[0].replace(regex, replacement);
-
-    edits.push({
+  return computeEditsForResolvedFile(
+    {
+      relativePath: uri.fsPath,
+      content: doc.getText(),
+      source: "workspace",
       uri,
-      range: new vscode.Range(start, end),
-      matchedText: match[0],
-      replacementText,
-    });
+    },
+    {
+      pattern: opts.pattern,
+      replacement: opts.replacement,
+      isRegex: opts.isRegex,
+      caseSensitive: opts.caseSensitive,
+      multiline: opts.multiline,
+    }
+  );
+}
 
-    // Prevent infinite loops on zero-width matches
-    if (match[0].length === 0) {
-      regex.lastIndex++;
+export function computeEditsForResolvedFile(
+  file: ResolvedFileForSearch,
+  opts: SearchReplaceOptions
+): EditDescriptor[] {
+  if (!file.uri || file.source === "not_found") {
+    return [];
+  }
+
+  const spans = computeTextEdits(file.content, opts);
+  if (spans.length === 0) {
+    return [];
+  }
+
+  const docLike = createLineIndex(file.content);
+  return spans.map((span) => ({
+    uri: file.uri!,
+    range: new vscode.Range(
+      docLike.positionAt(span.startOffset),
+      docLike.positionAt(span.endOffset)
+    ),
+    matchedText: span.matchedText,
+    replacementText: span.replacementText,
+  }));
+}
+
+function createLineIndex(text: string): { positionAt: (offset: number) => vscode.Position } {
+  const lineStarts = [0];
+  for (let i = 0; i < text.length; i++) {
+    if (text.charCodeAt(i) === 10) {
+      lineStarts.push(i + 1);
     }
   }
 
-  return edits;
+  return {
+    positionAt(offset: number): vscode.Position {
+      const clamped = Math.max(0, Math.min(offset, text.length));
+      let low = 0;
+      let high = lineStarts.length - 1;
+      while (low <= high) {
+        const mid = (low + high) >> 1;
+        if (lineStarts[mid] <= clamped) {
+          low = mid + 1;
+        } else {
+          high = mid - 1;
+        }
+      }
+      const line = Math.max(0, high);
+      return new vscode.Position(line, clamped - lineStarts[line]);
+    },
+  };
 }
 
 /**
@@ -136,11 +146,10 @@ export function applyEdits(edits: EditDescriptor[]): Thenable<boolean> {
 export async function searchReplaceAcrossFiles(
   uris: vscode.Uri[],
   opts: SearchReplaceOptions,
-  confirmThreshold = 200
+  confirmThreshold = 1
 ): Promise<number> {
-  let regex: RegExp;
   try {
-    regex = buildRegExp(opts);
+    buildRegExp(opts);
   } catch (err) {
     vscode.window.showErrorMessage(
       `Invalid search pattern: ${err instanceof Error ? err.message : String(err)}`
@@ -156,8 +165,8 @@ export async function searchReplaceAcrossFiles(
   // Gather all edit descriptors
   const allEdits: EditDescriptor[] = [];
   for (const uri of uris) {
-    const docEdits = await computeEditsForDocument(uri, regex, opts.replacement);
-    allEdits.push(...docEdits);
+    const docEdits2 = await computeEditsForDocument(uri, opts);
+    allEdits.push(...docEdits2);
   }
 
   if (allEdits.length === 0) {
@@ -168,9 +177,66 @@ export async function searchReplaceAcrossFiles(
   }
 
   // Confirmation gate for large change sets
-  if (allEdits.length > confirmThreshold) {
+  if (allEdits.length >= confirmThreshold) {
     const choice = await vscode.window.showWarningMessage(
       `Search/replace will modify ${allEdits.length} locations across ${uris.length} file(s).  Apply?`,
+      { modal: true },
+      "Apply",
+      "Cancel"
+    );
+    if (choice !== "Apply") {
+      return -1;
+    }
+  }
+
+  const ok = await applyEdits(allEdits);
+  if (!ok) {
+    vscode.window.showErrorMessage("WorkspaceEdit could not be applied.");
+    return -1;
+  }
+
+  vscode.window.showInformationMessage(
+    `Applied ${allEdits.length} replacement(s) across ${new Set(allEdits.map((e) => e.uri.toString())).size} file(s).`
+  );
+  return allEdits.length;
+}
+
+export async function searchReplaceAcrossResolvedFiles(
+  files: ResolvedFileForSearch[],
+  opts: SearchReplaceOptions,
+  confirmThreshold = 1
+): Promise<number> {
+  try {
+    buildRegExp(opts);
+  } catch (err) {
+    vscode.window.showErrorMessage(
+      `Invalid search pattern: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return -1;
+  }
+
+  if (!opts.pattern) {
+    vscode.window.showWarningMessage("Search pattern is empty — nothing to do.");
+    return 0;
+  }
+
+  const allEdits: EditDescriptor[] = [];
+  for (const file of files) {
+    if (!file.uri || file.source === "not_found") {
+      continue;
+    }
+    const edits = computeEditsForResolvedFile(file, opts);
+    allEdits.push(...edits);
+  }
+
+  if (allEdits.length === 0) {
+    vscode.window.showInformationMessage(`No matches found for "${opts.pattern}".`);
+    return 0;
+  }
+
+  if (allEdits.length >= confirmThreshold) {
+    const choice = await vscode.window.showWarningMessage(
+      `Search/replace will modify ${allEdits.length} locations across ${new Set(allEdits.map((e) => e.uri.toString())).size} file(s). Apply?`,
       { modal: true },
       "Apply",
       "Cancel"

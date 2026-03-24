@@ -210,6 +210,8 @@ class OrchestratorService:
 
         Uses the same clarification future mechanism as regular clarification so
         the existing /runs/{run_id}/clarify endpoint can resolve it.
+        Transitions the run status to AWAITING_SPECS_REVIEW while blocked,
+        then back to RUNNING once the human responds.
         """
         future = self.store.request_clarification(run_id)
         # Fetch the current specs from run state to include in payload
@@ -217,6 +219,7 @@ class OrchestratorService:
         specs_content = ""
         if record:
             specs_content = record.result.get("state", {}).get("specs", "")
+        self.store.update_status(run_id, RunStatus.AWAITING_SPECS_REVIEW)
         await self._emit(
             run_id,
             "specs_review_request",
@@ -230,9 +233,17 @@ class OrchestratorService:
             },
         )
         try:
-            return await asyncio.wait_for(future, timeout=300.0)
+            answer = await asyncio.wait_for(future, timeout=300.0)
         except TimeoutError:
-            return ""
+            answer = ""
+        finally:
+            record_after = self.store.get_run(run_id)
+            if (
+                record_after is not None
+                and record_after.status == RunStatus.AWAITING_SPECS_REVIEW
+            ):
+                self.store.update_status(run_id, RunStatus.RUNNING)
+        return answer
 
     async def _request_tool_call(
         self,
@@ -444,9 +455,6 @@ class OrchestratorService:
             "awaiting_specs_approval": False,
             # Senior prompt queue
             "senior_prompt_queue": [],
-            # Learning mode is always active for junior — also honoured when
-            # explicitly requested regardless of mode (backward-compatible).
-            "learning_mode": request.learning_mode or (request.mode == "junior"),
             "golden_files": [],
             "exercise_files": [],
             "learning_objectives": [],
@@ -693,7 +701,7 @@ class OrchestratorService:
             self.store.set_result(run_id, result)
 
             # Learning mode: pause and wait for junior's submission
-            if final_state.get("learning_mode") and final_state.get(
+            if final_state.get("mode") == "junior" and final_state.get(
                 "exercise_files"
             ):
                 self.store.update_status(run_id, RunStatus.AWAITING_SUBMISSION)

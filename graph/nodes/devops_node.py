@@ -26,7 +26,7 @@ from graph.prompts.devops_prompts import (
 )
 from graph.state import AgentState, SingleFileContent
 from integrations.cortex import get_cortex_llm
-from utils.node import maybe_compress, run_parallel
+from utils.node import get_mode_preamble, maybe_compress, run_parallel
 
 
 # ── Known file sets (path → FILE_HINT key) ────────────────────────────────────
@@ -385,6 +385,8 @@ def devops_node(state: AgentState) -> dict:
     )
     llm = get_cortex_llm(model="deepseek-r1", temperature=0.1, max_tokens=4096)
 
+    mode = state.get("mode", "senior")
+    mode_note = get_mode_preamble(mode)
     specs = state.get("specs", "")
     code_files = state.get("code_files", [])
     file_list = (
@@ -397,6 +399,7 @@ def devops_node(state: AgentState) -> dict:
     )
     # Full context for decision and planning (needs complete specs for accuracy).
     context = (
+        f"## Mode\n{mode_note}\n\n"
         f"## Application Specifications\n{specs}\n\n"
         f"## Generated Source Files\n{file_list}"
     )

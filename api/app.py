@@ -140,7 +140,9 @@ async def cancel_run(run_id: str) -> dict[str, str]:
 
 
 @app.post("/runs/{run_id}/approve-specs")
-async def approve_specs(run_id: str, request: SpecsReviewRequest) -> dict[str, str]:
+async def approve_specs(
+    run_id: str, request: SpecsReviewRequest
+) -> dict[str, str]:
     """Approve or request revision of the architect's generated specifications.
 
     When action='approve' the pipeline resumes. When action='revise' the feedback
@@ -151,7 +153,11 @@ async def approve_specs(run_id: str, request: SpecsReviewRequest) -> dict[str, s
         raise HTTPException(
             status_code=404, detail=f"Run '{run_id}' not found."
         )
-    answer = "approve" if request.action == "approve" else (request.feedback or "revise")
+    answer = (
+        "approve"
+        if request.action == "approve"
+        else (request.feedback or "revise")
+    )
     resolved = service.store.submit_clarification(run_id, answer)
     if not resolved:
         raise HTTPException(
@@ -161,7 +167,9 @@ async def approve_specs(run_id: str, request: SpecsReviewRequest) -> dict[str, s
 
 
 @app.post("/runs/{run_id}/queue-prompt")
-async def queue_prompt(run_id: str, request: QueuePromptRequest) -> dict[str, str]:
+async def queue_prompt(
+    run_id: str, request: QueuePromptRequest
+) -> dict[str, str]:
     """Inject an instruction into the senior developer's prompt queue.
 
     The queued prompt will be consumed on the next developer iteration.

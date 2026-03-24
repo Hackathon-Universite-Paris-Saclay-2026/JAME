@@ -130,6 +130,8 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
         line?: string;
         toolCallId?: string;
         action?: string;
+        feedback?: string;
+        prompt?: string;
       };
 
       if (msg.command === "openGeneratedFiles") {
@@ -173,6 +175,40 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ answer: msg.answer }),
+            });
+          } catch { /* ignore */ }
+        }
+        return;
+      }
+
+      if (msg.command === "submitSpecsReview") {
+        const backendUrlForSpecs = this.resolvedBackendUrl ?? vscode.workspace
+          .getConfiguration()
+          .get<string>("jameWorkflow.backendUrl", "http://localhost:8000");
+        const fetchFnSpecs = (globalThis as { fetch?: (input: string, init?: unknown) => Promise<any> }).fetch;
+        if (fetchFnSpecs && msg.runId && msg.action) {
+          try {
+            await fetchFnSpecs(`${backendUrlForSpecs}/runs/${msg.runId}/approve-specs`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action: msg.action, feedback: msg.feedback ?? "" }),
+            });
+          } catch { /* ignore */ }
+        }
+        return;
+      }
+
+      if (msg.command === "queuePrompt") {
+        const backendUrlForQueue = this.resolvedBackendUrl ?? vscode.workspace
+          .getConfiguration()
+          .get<string>("jameWorkflow.backendUrl", "http://localhost:8000");
+        const fetchFnQueue = (globalThis as { fetch?: (input: string, init?: unknown) => Promise<any> }).fetch;
+        if (fetchFnQueue && msg.runId && msg.prompt) {
+          try {
+            await fetchFnQueue(`${backendUrlForQueue}/runs/${msg.runId}/queue-prompt`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ prompt: msg.prompt }),
             });
           } catch { /* ignore */ }
         }

@@ -1004,3 +1004,32 @@ textarea:disabled { opacity: 0.5; cursor: not-allowed; }
   gap: 6px;
   flex-wrap: wrap;
 }
+
+/* Queue prompt card */
+.queue-prompt-card {
+  margin: 8px 12px;
+  padding: 10px 12px;
+  background: #1f242b;
+  border: 1px solid #3e4c5a;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.queue-prompt-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #9dc1e6;
+}
+
+.queue-prompt-title {
+  font-weight: 600;
+}
+
+.queue-prompt-actions {
+  display: flex;
+  gap: 6px;
+}

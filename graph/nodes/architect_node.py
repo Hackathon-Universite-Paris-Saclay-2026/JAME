@@ -34,18 +34,17 @@ from graph.prompts.architect_prompts import (
 )
 from graph.state import AgentState
 from integrations.cortex import get_cortex_llm
-from utils.node import maybe_compress, parse_json_safe, strip_thinking
+from utils.node import (
+    get_mode_preamble,
+    maybe_compress,
+    parse_json_safe,
+    strip_thinking,
+)
 
 
 MAX_INTERROGATION_ROUNDS = 3
 MAX_DESIGN_ITERATIONS = 3
 COMPRESS_THRESHOLD = 5000
-
-MODE_PREAMBLE: dict[str, str] = {
-    "junior": "Generate a simple, minimal implementation. Focus on clarity over completeness.",
-    "senior": "Generate a well-structured, production-quality implementation with clear separation of concerns.",
-    "expert": "Generate an enterprise-grade implementation with full observability, scalability, and security considerations.",
-}
 
 
 def _is_interactive() -> bool:
@@ -349,7 +348,7 @@ def architect_node(state: AgentState) -> dict:
 
     # ── Step 3: Build context + compress if needed ───────────────────────────
     mode = state.get("mode", "senior")
-    mode_note = MODE_PREAMBLE.get(mode, MODE_PREAMBLE["senior"])
+    mode_note = get_mode_preamble(mode)
     context = _build_context(user_request, clarifications)
     if mode_note:
         context = f"## Mode instruction\n{mode_note}\n\n{context}"
@@ -436,10 +435,8 @@ def architect_node(state: AgentState) -> dict:
         # connected).  Simple scopes auto-approve as before.
         if not interactive:
             _specs_review_callback = state.get("clarification_callback")
-            _mode = state.get("mode", "senior")
             _needs_review = (
                 scope in ("system", "product")
-                and _mode in ("senior",)
                 and _specs_review_callback is not None
             )
             if _needs_review:

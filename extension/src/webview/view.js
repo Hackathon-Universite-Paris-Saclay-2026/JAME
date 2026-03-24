@@ -30,6 +30,9 @@ const modeChangeOkEl       = document.getElementById('modeChangeOk');
 const modeChangeCancelEl   = document.getElementById('modeChangeCancel');
 let pendingMode = null;
 
+const SEND_ICON_BUILD = '<svg viewBox="0 0 16 16"><path d="M1 1l14 7L1 15V9l10-2L1 7V1z"/></svg>';
+const SEND_ICON_QUEUE = '<svg viewBox="0 0 16 16"><path d="M8 2l4 4H9v8H7V6H4l4-4z"/></svg>';
+
 modeChangeOkEl.addEventListener('click', () => {
   modeChangeConfirmEl.style.display = 'none';
   if (pendingMode) {
@@ -447,6 +450,7 @@ let historyDraft  = '';
 inputEl.addEventListener('input', () => {
   inputEl.style.height = 'auto';
   inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + 'px';
+  updateComposerActions();
   if (historyIndex !== -1) {
     historyIndex = -1;
     historyDraft = '';
@@ -540,12 +544,37 @@ stopBtn.addEventListener('click', stop);
 showLogsBtn.addEventListener('click', () => vscode.postMessage({ command: 'showLogs' }));
 newChatBtn.addEventListener('click', newChat);
 
+function updateComposerActions() {
+  if (!isRunning) {
+    sendBtn.style.display = 'flex';
+    stopBtn.style.display = 'none';
+    sendBtn.innerHTML = SEND_ICON_BUILD;
+    sendBtn.title = 'Build (Enter)';
+    return;
+  }
+
+  const hasText = Boolean(inputEl.value.trim());
+  if (hasText) {
+    sendBtn.style.display = 'flex';
+    stopBtn.style.display = 'none';
+    sendBtn.innerHTML = SEND_ICON_QUEUE;
+    sendBtn.title = 'Queue instruction (Enter)';
+    return;
+  }
+
+  sendBtn.style.display = 'none';
+  stopBtn.style.display = 'flex';
+  stopBtn.title = 'Cancel run';
+}
+
 // Running state
 function setRunning(running) {
   isRunning = running;
-  inputEl.disabled = running;
-  sendBtn.style.display = running ? 'none' : 'flex';
-  stopBtn.style.display = running ? 'flex' : 'none';
+  inputEl.disabled = false;
+  updateComposerActions();
+  inputEl.placeholder = running
+    ? 'Add instruction for the next developer iteration...'
+    : 'Describe what to build...';
   if (running) setProgressIndeterminate();
   else clearProgress();
   saveState();
@@ -1073,9 +1102,13 @@ function showSpecsReviewCard(question, specs) {
       '<div class="cs-q">Specifications review</div>' +
       '<div class="cs-a">' + escHtml(action === 'approve' ? 'Approved — proceeding to code generation.' : 'Revision requested: ' + feedback) + '</div>';
     card.replaceWith(summary);
-    // Use the same /clarify endpoint — answer is 'approve' or the feedback text
-    const answer = action === 'approve' ? 'approve' : (feedback || 'revise');
-    vscode.postMessage({ command: 'submitClarification', runId: currentRunId, answer });
+    // Route to the dedicated /approve-specs endpoint (action + feedback)
+    vscode.postMessage({
+      command: 'submitSpecsReview',
+      runId: currentRunId,
+      action,
+      feedback: action === 'revise' ? (feedback || '') : '',
+    });
     scrollFeed();
   }
 
@@ -1201,7 +1234,12 @@ function showIterationReviewCard(question) {
 function send() {
   const text = inputEl.value.trim();
   const slashCmd = activeSlashCmd;
-  if ((!text && !slashCmd) || isRunning) return;
+  if (!text && !slashCmd) {
+    if (isRunning && currentRunId) {
+      stop();
+    }
+    return;
+  }
 
   const mode = currentMode;
   const displayText = slashCmd ? slashCmd + (text ? ' ' + text : '') : text;
@@ -1211,6 +1249,21 @@ function send() {
   }
   historyIndex = -1;
   historyDraft = '';
+
+  if (isRunning) {
+    if (!currentRunId) {
+      addSysMsg('No active run to queue into.', 'warn');
+      return;
+    }
+    addUserMessage(displayText);
+    inputEl.value = '';
+    inputEl.style.height = 'auto';
+    updateComposerActions();
+    clearSlashCommand();
+    closeSuggestions();
+    vscode.postMessage({ command: 'queuePrompt', runId: currentRunId, prompt: displayText });
+    return;
+  }
 
   generatedFiles = [];
   projectDir = null;
@@ -1479,6 +1532,11 @@ function handleServerEvent(data) {
     const p = data.payload || {};
     const question = p.question || data.message || 'QA iteration review:';
     showIterationReviewCard(question);
+    return;
+  }
+
+  if (event === 'prompt_queued') {
+    addSysMsg('Instruction queued for next developer iteration.', 'ok');
     return;
   }
 

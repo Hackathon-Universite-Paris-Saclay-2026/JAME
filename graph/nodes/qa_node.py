@@ -48,7 +48,12 @@ from graph.prompts.qa_prompts import (
 )
 from graph.state import AgentState, CodeFile, QAIssue
 from integrations.cortex import get_cortex_llm
-from utils.node import parse_json_safe, run_parallel, strip_thinking
+from utils.node import (
+    get_mode_preamble,
+    parse_json_safe,
+    run_parallel,
+    strip_thinking,
+)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -388,7 +393,22 @@ def _ruff_code_is_blocking(code: str) -> bool:
         if code.startswith(prefix):
             return True
     # Explicitly not blocking: style/cosmetic
-    style_prefixes = ("E", "W", "D", "ANN", "N", "Q", "UP", "RET", "TRY", "SIM", "I", "T", "PT", "ERA")
+    style_prefixes = (
+        "E",
+        "W",
+        "D",
+        "ANN",
+        "N",
+        "Q",
+        "UP",
+        "RET",
+        "TRY",
+        "SIM",
+        "I",
+        "T",
+        "PT",
+        "ERA",
+    )
     for prefix in style_prefixes:
         if code.startswith(prefix):
             return False
@@ -574,7 +594,12 @@ def qa_node(state: AgentState) -> dict:
     print("🔍  QUALITY ENGINEER — AI-DLC CONSTRUCTION / Build and Test")
     print("=" * 60)
 
+    mode = state.get("mode", "senior")
+    mode_note = get_mode_preamble(mode)
     specs = state.get("specs", "")
+    # Prepend mode guidance so triage/review LLM calls calibrate their
+    # severity thresholds to the project's quality bar.
+    specs_with_mode = f"## Mode\n{mode_note}\n\n{specs}"
     raw_files = state.get("code_files", [])
     iteration = state.get("iteration", 0)
     max_iterations = state.get("max_iterations", 3)
@@ -689,7 +714,7 @@ def qa_node(state: AgentState) -> dict:
         )
 
     # ── [TRIAGE] ─────────────────────────────────────────────────────────────
-    priority_map = _triage(llm, specs, code_files)
+    priority_map = _triage(llm, specs_with_mode, code_files)
     _log(
         {
             "agent": "qa",
@@ -719,7 +744,7 @@ def qa_node(state: AgentState) -> dict:
             partial(
                 _analyse_file,
                 llm,
-                specs,
+                specs_with_mode,
                 f,
                 priority_map.get(f.path, "standard"),
                 tool_issues_by_file.get(f.path, []),
@@ -737,7 +762,9 @@ def qa_node(state: AgentState) -> dict:
     )
 
     # ── [CROSS] ──────────────────────────────────────────────────────────────
-    cross_file_result = _cross_file_check(llm, specs, per_file_results)
+    cross_file_result = _cross_file_check(
+        llm, specs_with_mode, per_file_results
+    )
     _log(
         {
             "agent": "qa",
@@ -808,7 +835,7 @@ def qa_node(state: AgentState) -> dict:
             partial(
                 _generate_fix_instructions,
                 llm,
-                specs,
+                specs_with_mode,
                 code_file,
                 result["issues"],
                 tool_issues_by_file.get(code_file.path, []),
@@ -866,7 +893,13 @@ def qa_node(state: AgentState) -> dict:
                     "content": f"Senior review checkpoint: {len(all_qa_issues)} issue(s) found. Waiting for human.",
                 }
             )
-            human_input = (clarification_callback(_review_prompt, ["proceed | Let developer fix automatically"]) or "").strip()
+            human_input = (
+                clarification_callback(
+                    _review_prompt,
+                    ["proceed | Let developer fix automatically"],
+                )
+                or ""
+            ).strip()
             if human_input and human_input.lower() not in ("proceed", ""):
                 # Queue the instruction for the developer's next iteration
                 _log(

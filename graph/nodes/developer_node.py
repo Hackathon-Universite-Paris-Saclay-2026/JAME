@@ -44,7 +44,7 @@ from graph.state import (
     _sanitize_path,
 )
 from integrations.cortex import get_cortex_llm
-from utils.node import strip_thinking
+from utils.node import get_mode_preamble, strip_thinking
 
 
 # ---------------------------------------------------------------------------
@@ -917,20 +917,16 @@ def developer_node(state: AgentState) -> dict:
 
     # ── Mode-aware preamble + senior prompt queue injection ──────
     mode = state.get("mode", "senior")
-    mode_preambles: dict[str, str] = {
-        "junior": "Generate a simple, minimal implementation. Focus on clarity over completeness.",
-        "senior": "Generate a well-structured, production-quality implementation with clear separation of concerns.",
-        "expert": "Generate an enterprise-grade implementation with full observability, scalability, and security considerations.",
-    }
-    mode_note = mode_preambles.get(mode, mode_preambles["senior"])
+    mode_note = get_mode_preamble(mode)
 
     # Consume queued instructions — prepend to specs context for this iteration.
     # Available to all modes: any human can inject instructions via the queue.
     senior_queue: list[str] = list(state.get("senior_prompt_queue", []))
     senior_instructions = ""
     if senior_queue:
-        senior_instructions = "\n\n## Developer instructions (queued by user):\n" + "\n".join(
-            f"- {p}" for p in senior_queue
+        senior_instructions = (
+            "\n\n## Developer instructions (queued by user):\n"
+            + "\n".join(f"- {p}" for p in senior_queue)
         )
         _log(
             {
@@ -941,7 +937,9 @@ def developer_node(state: AgentState) -> dict:
         )
 
     # Prepend mode note and queued instructions to specs for this iteration.
-    augmented_specs = f"## Mode instruction\n{mode_note}\n\n{specs}{senior_instructions}"
+    augmented_specs = (
+        f"## Mode instruction\n{mode_note}\n\n{specs}{senior_instructions}"
+    )
 
     # ── Phase 1: Functional Design ───────────────────────────────
     raise_if_cancelled()

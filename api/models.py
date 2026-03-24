@@ -34,13 +34,6 @@ class RunCreateRequest(BaseModel):
         le=10,
         description="Maximum QA→Developer retry loops before forcing completion.",
     )
-    learning_mode: bool = Field(
-        default=False,
-        description=(
-            "Enable Learning Mode: generates exercise files with TODOs for junior developers. "
-            "Automatically true when mode='junior'."
-        ),
-    )
     mode: str = Field(
         default="senior",
         pattern="^(junior|senior|expert)$",

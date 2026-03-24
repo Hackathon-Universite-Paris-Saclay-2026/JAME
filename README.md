@@ -88,6 +88,15 @@ FastAPI Backend (uvicorn)
 | `POST` | `/runs/{run_id}/cancel` | Request immediate cancellation |
 | `WebSocket` | `/ws/runs/{run_id}` | Stream real-time events |
 
+### Extension command IDs
+
+The smart search-and-replace command intentionally keeps the namespaced ID
+`jameWorkflow.searchReplaceSmart`.
+
+- This preserves ownership clarity in multi-extension workspaces.
+- UI label remains: **JAME: Smart Search & Replace**.
+- Keybindings and automation should target the namespaced command ID.
+
 ### WebSocket events
 
 | Event | Description |
