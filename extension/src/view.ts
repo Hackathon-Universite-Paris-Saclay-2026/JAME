@@ -113,6 +113,7 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
         runId?: string;
         destDir?: string;
         answer?: string;
+        line?: string;
       };
 
       if (msg.command === "openGeneratedFiles") {
@@ -708,6 +709,20 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
       line-height: 1.6;
       color: #6a6a6a;
       max-width: 240px;
+    }
+
+    /* ── AI Act disclosure ───────────────────────────────────────── */
+    .ai-act-notice {
+      font-size: 10px;
+      color: #6b5e2a;
+      text-align: center;
+      margin-top: 6px;
+      padding: 5px 10px;
+      background: #1c1a14;
+      border-top: 1px solid #2a2518;
+      letter-spacing: 0.01em;
+      line-height: 1.5;
+      word-break: break-word;
     }
 
     /* ── User message bubble ─────────────────────────────────────── */
@@ -1515,6 +1530,7 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
         </button>
       </div>
       <div class="hint">Enter to send · Shift+Enter for new line</div>
+      <div class="ai-act-notice">&#9432; This tool uses AI — outputs may contain errors. You are responsible for reviewing generated code before use.</div>
     </div>
   </div>
 
@@ -2822,16 +2838,16 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
       // even when the backend is externally managed (not spawned by the extension).
       {
         const ts = new Date().toISOString().substring(11, 23);
-        const phase = data.phase ? `[${String(data.phase).toUpperCase()}]` : '';
-        const agent = rawAgent ? `[${rawAgent.toUpperCase()}]` : '';
-        vscode.postMessage({ command: 'logEvent', line: `${ts} ${agent}${phase} ${data.message || event}` });
+        const phase = data.phase ? '[' + String(data.phase).toUpperCase() + ']' : '';
+        const agent = rawAgent ? '[' + rawAgent.toUpperCase() + ']' : '';
+        vscode.postMessage({ command: 'logEvent', line: ts + ' ' + agent + phase + ' ' + (data.message || event) });
       }
 
       if (event === 'run_started') {
         vscode.postMessage({ command: 'clearLogs' });
-        vscode.postMessage({ command: 'logEvent', line: '─'.repeat(60) });
-        vscode.postMessage({ command: 'logEvent', line: `[JAME] Run started at ${new Date().toISOString()}` });
-        vscode.postMessage({ command: 'logEvent', line: '─'.repeat(60) });
+        vscode.postMessage({ command: 'logEvent', line: '\u2500'.repeat(60) });
+        vscode.postMessage({ command: 'logEvent', line: '[JAME] Run started at ' + new Date().toISOString() });
+        vscode.postMessage({ command: 'logEvent', line: '\u2500'.repeat(60) });
         addSysMsg('Orchestration started', 'info');
         return;
       }
