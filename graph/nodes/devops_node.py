@@ -458,7 +458,13 @@ def devops_node(state: AgentState) -> dict:
 
     if not decision.needs_ci:
         print("[SKIP] No CI/CD artifacts needed — generating Makefile only.\n")
-        _log({"agent": "devops", "phase": "act", "content": "Generating Makefile only (no CI/CD needed)."})
+        _log(
+            {
+                "agent": "devops",
+                "phase": "act",
+                "content": "Generating Makefile only (no CI/CD needed).",
+            }
+        )
         makefile_content = _generate_file(
             llm.bind(max_tokens=_get_max_tokens("Makefile")),
             CI_SYSTEM_PROMPT,
@@ -472,7 +478,9 @@ def devops_node(state: AgentState) -> dict:
             if makefile_content.strip()
             else []
         )
-        reason_msg = "No CI/CD required — Makefile generated for local dev convenience."
+        reason_msg = (
+            "No CI/CD required — Makefile generated for local dev convenience."
+        )
         _log({"agent": "devops", "phase": "reason", "content": reason_msg})
         return {
             "ci_files": ci_files,
@@ -481,7 +489,11 @@ def devops_node(state: AgentState) -> dict:
             "needs_cd": False,
             "reasoning_logs": [
                 {"agent": "devops", "phase": "plan", "content": plan_trace},
-                {"agent": "devops", "phase": "act", "content": "Generating Makefile only (no CI/CD needed)."},
+                {
+                    "agent": "devops",
+                    "phase": "act",
+                    "content": "Generating Makefile only (no CI/CD needed).",
+                },
                 {"agent": "devops", "phase": "reason", "content": reason_msg},
             ],
         }
