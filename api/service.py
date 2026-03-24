@@ -444,8 +444,9 @@ class OrchestratorService:
             "awaiting_specs_approval": False,
             # Senior prompt queue
             "senior_prompt_queue": [],
-            # Learning mode fields
-            "learning_mode": request.learning_mode,
+            # Learning mode is always active for junior — also honoured when
+            # explicitly requested regardless of mode (backward-compatible).
+            "learning_mode": request.learning_mode or (request.mode == "junior"),
             "golden_files": [],
             "exercise_files": [],
             "learning_objectives": [],
