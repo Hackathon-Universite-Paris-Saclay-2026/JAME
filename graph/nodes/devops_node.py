@@ -177,7 +177,7 @@ def _decide(llm: BaseChatModel, context: str) -> DevOpsDecision:
         )
 
 
-def _enforce_dependencies(plan: "DevOpsFilePlan") -> None:
+def _enforce_dependencies(plan: DevOpsFilePlan) -> None:
     """Enforce inter-file coherence rules on a DevOpsFilePlan in-place.
 
     Rules:
@@ -438,6 +438,12 @@ def devops_node(state: AgentState) -> dict:
         f"## Generated Source Files\n{file_list}"
     )
 
+    run_output_dir = state.get("run_output_dir", "")
+    project_dir: Path | None = None
+    if run_output_dir:
+        project_dir = (Path(run_output_dir) / "output" / "project").resolve()
+        project_dir.mkdir(parents=True, exist_ok=True)
+
     # ── Plan phase: decide CI/CD scope ────────────────────────────────────────
     print("\n[PLAN] Deciding CI/CD scope …")
     _log(
@@ -451,23 +457,34 @@ def devops_node(state: AgentState) -> dict:
     _log({"agent": "devops", "phase": "plan", "content": plan_trace})
 
     if not decision.needs_ci:
-        print("[SKIP] No CI/CD artifacts needed for this project type.\n")
-        skip_msg = "Skipped — no CI/CD required."
-        reason_msg = "Project is a pure library or script with no service."
-        _log({"agent": "devops", "phase": "act", "content": skip_msg})
+        print("[SKIP] No CI/CD artifacts needed — generating Makefile only.\n")
+        _log({"agent": "devops", "phase": "act", "content": "Generating Makefile only (no CI/CD needed)."})
+        makefile_content = _generate_file(
+            llm.bind(max_tokens=_get_max_tokens("Makefile")),
+            CI_SYSTEM_PROMPT,
+            generation_context,
+            "Makefile",
+            _CI_FILE_HINTS["Makefile"],
+            project_dir,
+        )
+        ci_files: list[dict] = (
+            [{"path": "Makefile", "content": makefile_content}]
+            if makefile_content.strip()
+            else []
+        )
+        reason_msg = "No CI/CD required — Makefile generated for local dev convenience."
         _log({"agent": "devops", "phase": "reason", "content": reason_msg})
-        updates: dict = {
-            "ci_files": [],
+        return {
+            "ci_files": ci_files,
             "cd_files": [],
             "needs_ci": False,
             "needs_cd": False,
             "reasoning_logs": [
                 {"agent": "devops", "phase": "plan", "content": plan_trace},
-                {"agent": "devops", "phase": "act", "content": skip_msg},
+                {"agent": "devops", "phase": "act", "content": "Generating Makefile only (no CI/CD needed)."},
                 {"agent": "devops", "phase": "reason", "content": reason_msg},
             ],
         }
-        return updates
 
     # ── Plan phase: select files ───────────────────────────────────────────────
     print("[PLAN] Selecting files to generate …")
@@ -500,12 +517,6 @@ def devops_node(state: AgentState) -> dict:
     # ── Act phase: generate all CI + CD files in parallel ─────────────────────
     # CI and CD files are fully independent — build a flat task list and run
     # everything at once (CI first, then CD for predictable log ordering).
-    run_output_dir = state.get("run_output_dir", "")
-    project_dir: Path | None = None
-    if run_output_dir:
-        project_dir = (Path(run_output_dir) / "output" / "project").resolve()
-        project_dir.mkdir(parents=True, exist_ok=True)
-
     ci_tasks, ci_meta = _collect_file_tasks(
         llm,
         generation_context,
