@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import operator
 import re
-from typing import Annotated, TypedDict
+from typing import Annotated, Any, TypedDict
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -134,6 +134,10 @@ class QAIssue(BaseModel):
     )
     severity: str = Field(description="'critical' | 'major' | 'minor'")
     description: str = Field(description="What is wrong and how to fix it")
+    security_rule: str | None = Field(
+        default=None,
+        description="AI-DLC security rule ID (e.g. 'SECURITY-05'), or null",
+    )
 
 
 class QAResult(BaseModel):
@@ -144,6 +148,44 @@ class QAResult(BaseModel):
         default_factory=list,
         description="List of issues found. Empty if passed=True.",
     )
+
+
+class ScopeDecision(BaseModel):
+    """Structured output for the QA scope decision."""
+
+    needs_full_qa: bool = Field(
+        description=(
+            "True when the project has multiple interdependent modules or is a "
+            "service/API. False for single functions, pure utilities, or 1-2 file scripts."
+        )
+    )
+    reasoning: str = Field(description="One-sentence justification.")
+
+
+class AnalysisIssue(BaseModel):
+    """A single issue from per-file static analysis (richer than QAIssue)."""
+
+    severity: str = Field(description="'critical' | 'major' | 'minor'")
+    security_rule: str | None = Field(
+        default=None,
+        description="AI-DLC security rule ID (e.g. 'SECURITY-05'), or null",
+    )
+    line_hint: str | None = Field(
+        default=None,
+        description="Line number or range if identifiable, else null",
+    )
+    description: str = Field(
+        default="", description="What is wrong and why it matters"
+    )
+    fix: str = Field(default="", description="Concrete fix or recommendation")
+
+
+class StaticAnalysisResult(BaseModel):
+    """Structured output from per-file static analysis."""
+
+    file: str = Field(description="File path that was analysed")
+    issues: list[AnalysisIssue] = Field(default_factory=list)
+    has_issues: bool = Field(default=False)
 
 
 # Kept for backward compatibility with any existing serialised state.
@@ -184,10 +226,18 @@ class AgentState(TypedDict):
     qa_passed: bool
     qa_feedback: str  # plain-text feedback sent back to Developer on failure
     qa_issues: list[QAIssue]  # structured, actionable issue tickets
+    run_output_dir: (
+        str  # absolute path to runs/{run_id}/ — QA uses it for venv + project
+    )
 
     # ── Orchestrator bookkeeping ────────────────────────────────
     iteration: int  # QA retry counter
     max_iterations: int  # safety cap
+    mode: str  # "junior" | "senior" | "expert" — agent behaviour mode
+    clarification_callback: (
+        Any  # callable(question, options) -> answer (not serialised)
+    )
+    emit_callback: Any  # callable(log_dict) -> None — fires immediately for real-time streaming (not serialised)
     reasoning_logs: Annotated[
         list[ReasoningEntry], operator.add
     ]  # append-only trace

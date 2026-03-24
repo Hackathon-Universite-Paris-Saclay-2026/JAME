@@ -23,6 +23,10 @@ class InMemoryRunStore:
         self._cancelled: set[str] = set()
         self._tokens: dict[str, CancelToken] = {}
         self._chunk_queues: dict[str, asyncio.Queue] = {}
+        self._clarification_futures: dict[str, asyncio.Future[str]] = {}
+        # Buffer all events so late-joining WebSocket subscribers (race with pipeline start)
+        # receive the full history on connect.
+        self._event_buffer: dict[str, list[ReasoningEvent]] = defaultdict(list)
 
     def create_run(self, run_id: str, request: RunCreateRequest) -> RunRecord:
         """Create and persist a new run record in pending state."""
@@ -68,9 +72,9 @@ class InMemoryRunStore:
         self._chunk_queues[run_id] = chunk_queue
 
     def cancel_run(self, run_id: str) -> bool:
-        """Cancel a running run — fires the token AND unblocks the async queue immediately."""
+        """Cancel a running (or pending) run — fires the token AND unblocks the async queue immediately."""
         record = self._runs.get(run_id)
-        if record and record.status == RunStatus.RUNNING:
+        if record and record.status in (RunStatus.RUNNING, RunStatus.PENDING):
             self._cancelled.add(run_id)
             token = self._tokens.get(run_id)
             if token:
@@ -86,6 +90,24 @@ class InMemoryRunStore:
     def is_cancelled(self, run_id: str) -> bool:
         """Return whether cancellation has been requested for the run."""
         return run_id in self._cancelled
+
+    def request_clarification(self, run_id: str) -> asyncio.Future[str]:
+        """Create and store an asyncio Future that will be resolved when the user answers."""
+        loop = asyncio.get_event_loop()
+        future: asyncio.Future[str] = loop.create_future()
+        self._clarification_futures[run_id] = future
+        return future
+
+    def submit_clarification(self, run_id: str, answer: str) -> bool:
+        """Resolve the pending clarification future with the user's answer.
+
+        Returns True if a pending future was found and resolved.
+        """
+        future = self._clarification_futures.pop(run_id, None)
+        if future and not future.done():
+            future.set_result(answer)
+            return True
+        return False
 
     def artifacts_for(self, run_id: str) -> dict[str, str]:
         """Build artifact paths for a completed run."""
@@ -107,16 +129,41 @@ class InMemoryRunStore:
             artifacts["generated_files"] = json.dumps(generated)
         return artifacts
 
+    TERMINAL_EVENTS: frozenset[str] = frozenset(
+        {"run_completed", "run_failed", "run_cancelled"}
+    )
+
     async def publish(self, event: ReasoningEvent) -> None:
-        """Publish an event to all subscribers for the event's run id."""
+        """Publish an event to all subscribers for the event's run id.
+
+        Also buffers the event so late-joining subscribers receive the full
+        history. After a terminal event the sentinel ``None`` is pushed so
+        WebSocket consumers can exit their read loop cleanly.
+        """
+        self._event_buffer[event.run_id].append(event)
         for queue in list(self._subscribers[event.run_id]):
             await queue.put(event)
+            if event.event in self.TERMINAL_EVENTS:
+                await queue.put(None)  # type: ignore[arg-type]
 
     def subscribe(self, run_id: str) -> asyncio.Queue[ReasoningEvent]:
-        """Create and register a subscriber queue for a run."""
+        """Create and register a subscriber queue, pre-filled with buffered events.
+
+        Any events already published before this subscribe() call are replayed
+        immediately so the WebSocket handler never misses the pipeline start.
+        """
         queue: asyncio.Queue[ReasoningEvent] = asyncio.Queue()
+        # Replay buffered history first
+        for past_event in self._event_buffer.get(run_id, []):
+            queue.put_nowait(past_event)
+            if past_event.event in self.TERMINAL_EVENTS:
+                queue.put_nowait(None)  # type: ignore[arg-type]
         self._subscribers[run_id].append(queue)
         return queue
+
+    def has_subscribers(self, run_id: str) -> bool:
+        """Return True if at least one WebSocket client is subscribed to this run."""
+        return bool(self._subscribers.get(run_id))
 
     def unsubscribe(
         self, run_id: str, queue: asyncio.Queue[ReasoningEvent]

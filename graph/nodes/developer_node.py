@@ -17,7 +17,7 @@ Architecture enforced across all generated projects:
 
 from __future__ import annotations
 
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -371,6 +371,7 @@ def _generate_file(
     functional_design: str,
     generated: dict[str, dict],
     file_issues: str = "",
+    project_dir: Path | None = None,
 ) -> dict | None:
     """Generate a single file. Returns its dict or ``None`` on failure."""
     user_msg = _build_file_prompt(
@@ -390,6 +391,11 @@ def _generate_file(
     if not content.strip():
         _log("high", "ACT", f"Empty content for {file_path}, skipping")
         return None
+
+    if project_dir is not None:
+        dest = project_dir / file_path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(content, encoding="utf-8")
 
     print(f"[ACT]    \u2713 {len(content)} chars")
     return {
@@ -549,6 +555,7 @@ def _run_code_generation(
     qa_issues: list[dict],
     qa_feedback: str,
     iteration: int,
+    project_dir: Path | None = None,
 ) -> tuple[list[dict], dict[str, dict]]:
     """Generate all planned files. Returns ``(code_files, generated_map)``."""
     code_files: list[dict] = []
@@ -559,6 +566,7 @@ def _run_code_generation(
         generated.update(existing_files)
 
     for i, file_path in enumerate(file_plan, 1):
+        raise_if_cancelled()
         file_path = _sanitize_path(file_path)
         print(
             f"\n[ACT]  Generating file {i}/{len(file_plan)}: {file_path} \u2026"
@@ -568,7 +576,13 @@ def _run_code_generation(
             file_path, qa_issues, qa_feedback, iteration
         )
         result = _generate_file(
-            llm, file_path, specs, functional_design, generated, file_issues
+            llm,
+            file_path,
+            specs,
+            functional_design,
+            generated,
+            file_issues,
+            project_dir,
         )
         if result:
             code_files.append(result)
@@ -660,6 +674,7 @@ def _run_auto_fix(
     validation_issues: list[dict],
     specs: str,
     functional_design: str,
+    project_dir: Path | None = None,
 ) -> None:
     """Auto-fix files with critical/major validation issues. Mutates *code_files* in place."""
     critical_files = {
@@ -695,6 +710,7 @@ def _run_auto_fix(
             functional_design,
             generated,
             file_issues=f"\n## Consistency issues to fix in THIS file:\n{fix_text}",
+            project_dir=project_dir,
         )
         if result:
             code_files[file_idx] = result
@@ -723,7 +739,12 @@ def _resolve_all_generated(generated: dict[str, dict]) -> str:
     )
 
 
-def _run_lightweight(llm: BaseChatModel, scope: str, specs: str) -> list[dict]:
+def _run_lightweight(
+    llm: BaseChatModel,
+    scope: str,
+    specs: str,
+    project_dir: Path | None = None,
+) -> list[dict]:
     """Generate code for a function- or feature-level request.
 
     Skips the full-stack pipeline entirely — produces only the minimal files
@@ -758,6 +779,7 @@ def _run_lightweight(llm: BaseChatModel, scope: str, specs: str) -> list[dict]:
     generated: dict[str, dict] = {}
 
     for i, file_path in enumerate(file_plan, 1):
+        raise_if_cancelled()
         file_path = _sanitize_path(file_path)
         print(
             f"\n[ACT]  Generating file {i}/{len(file_plan)}: {file_path} \u2026"
@@ -780,6 +802,10 @@ def _run_lightweight(llm: BaseChatModel, scope: str, specs: str) -> list[dict]:
 
         content = _strip_markdown_fences(content)
         if content.strip():
+            if project_dir is not None:
+                dest = project_dir / file_path
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text(content, encoding="utf-8")
             file_dict = {
                 "path": file_path,
                 "content": content,
@@ -813,6 +839,19 @@ def developer_node(state: AgentState) -> dict:
     )
     print("=" * 60)
 
+    _emit = state.get("emit_callback")
+
+    def _log(entry: dict) -> None:
+        if _emit:
+            _emit(entry)
+
+    _log(
+        {
+            "agent": "developer",
+            "phase": "plan",
+            "content": "Developer agent starting…",
+        }
+    )
     llm = get_cortex_llm(model="deepseek-r1", temperature=0.2, max_tokens=8000)
 
     specs = state.get("specs", "")
@@ -826,12 +865,34 @@ def developer_node(state: AgentState) -> dict:
         print(
             f"\n\u26a1 Lightweight mode ({scope}) \u2014 skipping full-stack pipeline"
         )
-        code_files = _run_lightweight(llm, scope, specs)
+        lw_run_output_dir = state.get("run_output_dir", "")
+        lw_project_dir: Path | None = None
+        if lw_run_output_dir:
+            lw_project_dir = (
+                Path(lw_run_output_dir) / "output" / "project"
+            ).resolve()
+            lw_project_dir.mkdir(parents=True, exist_ok=True)
+        _log(
+            {
+                "agent": "developer",
+                "phase": "plan",
+                "content": f"Lightweight scope ({scope}) — minimal file set.",
+            }
+        )
+        code_files = _run_lightweight(llm, scope, specs, lw_project_dir)
         file_list = (
             ", ".join(f["path"] for f in code_files) if code_files else "(none)"
         )
         reason = f"Lightweight ({scope}): generated {len(code_files)} file(s): {file_list}"
+        _log(
+            {
+                "agent": "developer",
+                "phase": "act",
+                "content": f"Generated {len(code_files)} file(s).",
+            }
+        )
         print(f"\n[REASON] {reason}\n")
+        _log({"agent": "developer", "phase": "reason", "content": reason})
         return {
             "functional_design": "",
             "code_files": code_files,
@@ -851,8 +912,16 @@ def developer_node(state: AgentState) -> dict:
         }
 
     # ── Phase 1: Functional Design ───────────────────────────────
+    raise_if_cancelled()
     functional_design = state.get("functional_design", "")
     if iteration == 0:
+        _log(
+            {
+                "agent": "developer",
+                "phase": "design",
+                "content": "Extracting functional design…",
+            }
+        )
         functional_design = _run_functional_design(llm, specs)
         design_trace = (
             f"Extracted functional design ({len(functional_design)} chars): "
@@ -861,8 +930,17 @@ def developer_node(state: AgentState) -> dict:
     else:
         design_trace = "Reusing functional design from previous iteration."
         print(f"\n[DESIGN] {design_trace}")
+    _log({"agent": "developer", "phase": "design", "content": design_trace})
 
     # ── Phase 2: File Planning ───────────────────────────────────
+    raise_if_cancelled()
+    _log(
+        {
+            "agent": "developer",
+            "phase": "plan",
+            "content": "Planning files to generate…",
+        }
+    )
     file_plan, plan_trace = _run_file_planning(
         llm,
         specs,
@@ -871,8 +949,22 @@ def developer_node(state: AgentState) -> dict:
         qa_feedback,
         iteration,
     )
+    _log({"agent": "developer", "phase": "plan", "content": plan_trace})
 
     # ── Phase 3: Code Generation ─────────────────────────────────
+    run_output_dir = state.get("run_output_dir", "")
+    project_dir: Path | None = None
+    if run_output_dir:
+        project_dir = (Path(run_output_dir) / "output" / "project").resolve()
+        project_dir.mkdir(parents=True, exist_ok=True)
+
+    _log(
+        {
+            "agent": "developer",
+            "phase": "act",
+            "content": "Generating code files (dependency-ordered)…",
+        }
+    )
     existing_files = {f["path"]: f for f in state.get("code_files", [])}
     code_files, generated = _run_code_generation(
         llm,
@@ -883,9 +975,24 @@ def developer_node(state: AgentState) -> dict:
         qa_issues,
         qa_feedback,
         iteration,
+        project_dir,
+    )
+    _log(
+        {
+            "agent": "developer",
+            "phase": "act",
+            "content": f"Chunked generation: {len(code_files)} files produced.",
+        }
     )
 
     # ── Phase 4: Self-Validation ─────────────────────────────────
+    _log(
+        {
+            "agent": "developer",
+            "phase": "validate",
+            "content": "Running self-validation…",
+        }
+    )
     validation_issues = _run_self_validation(llm, code_files)
     if validation_issues:
         _run_auto_fix(
@@ -895,6 +1002,7 @@ def developer_node(state: AgentState) -> dict:
             validation_issues,
             specs,
             functional_design,
+            project_dir,
         )
 
     # ── Reasoning trace ──────────────────────────────────────────
@@ -908,6 +1016,7 @@ def developer_node(state: AgentState) -> dict:
             "(auto-fix attempted)"
         )
     print(f"\n[REASON] {reason_trace}\n")
+    _log({"agent": "developer", "phase": "reason", "content": reason_trace})
 
     return {
         "functional_design": functional_design,

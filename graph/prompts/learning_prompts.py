@@ -5,8 +5,8 @@ from graph.prompts import load_prompts as _load
 
 _p = _load("learning_mode")
 
-ANALYZE_PROMPT: str = _p["stripper"]["analyze"]
-STRIP_PROMPT: str = _p["stripper"]["strip"]
+ANALYZE_PROMPT: str = _p["exercise_generator"]["analyze"]
+STRIP_PROMPT: str = _p["exercise_generator"]["strip"]
 
 REVIEW_PROMPT: str = _p["validator"]["review"]
 HINT_LEVEL_1_PROMPT: str = _p["validator"]["hints"]["level_1"]

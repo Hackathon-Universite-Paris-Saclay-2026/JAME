@@ -83,7 +83,7 @@ def _file_summary(files: list[CodeFile]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def stripper_node(state: AgentState) -> dict:
+def exercise_generator_node(state: AgentState) -> dict:
     """Analyze golden solution and produce exercise files with TODOs.
 
     Args:
@@ -98,6 +98,12 @@ def stripper_node(state: AgentState) -> dict:
 
     llm = get_cortex_llm(temperature=0.2)
     logs: list[dict] = []
+    _emit = state.get("emit_callback")
+
+    def _log(entry: dict) -> None:
+        logs.append(entry)
+        if _emit:
+            _emit(entry)
 
     raw_files = state.get("code_files", [])
     code_files = [_to_code_file(f) for f in raw_files]
@@ -111,7 +117,7 @@ def stripper_node(state: AgentState) -> dict:
     print("=" * 60)
     print("[ANALYZE] Identifying business logic blocks to strip …")
 
-    logs.append(
+    _log(
         {
             "agent": "stripper",
             "phase": "plan",
@@ -140,7 +146,7 @@ def stripper_node(state: AgentState) -> dict:
     analysis: list[dict] = parsed if isinstance(parsed, list) else []
 
     print(f"[ANALYZE] {len(analysis)} file(s) with learning blocks identified.")
-    logs.append(
+    _log(
         {
             "agent": "stripper",
             "phase": "reason",
@@ -228,7 +234,7 @@ def stripper_node(state: AgentState) -> dict:
 
     print(f"[PACKAGE] {len(exercise_files)} exercise file(s) ready.")
     print(f"[PACKAGE] {len(learning_objectives)} learning objective(s).")
-    logs.append(
+    _log(
         {
             "agent": "stripper",
             "phase": "reason",
