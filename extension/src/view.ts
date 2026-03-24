@@ -510,17 +510,34 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
     const parsed = new URL(backendUrl);
     const port = parsed.port || "8000";
 
+    // Capture stderr so startup crashes surface a useful error message
+    let stderrOutput = "";
     this.backendProcess = spawn(
       venvPython,
       ["-m", "uvicorn", "api.app:app", "--host", "0.0.0.0", "--port", port],
       {
         cwd: repoRoot,
-        stdio: "ignore",
+        stdio: ["ignore", "ignore", "pipe"],
         detached: false,
       }
     );
 
-    const timeoutMs = 20000;
+    if (this.backendProcess.stderr) {
+      this.backendProcess.stderr.on("data", (chunk: Buffer) => {
+        stderrOutput += chunk.toString();
+        // Keep only the last 2000 chars to avoid unbounded growth
+        if (stderrOutput.length > 2000) {
+          stderrOutput = stderrOutput.slice(-2000);
+        }
+      });
+    }
+
+    // Detect immediate crash (e.g. import error, bad port)
+    const exitPromise = new Promise<number | null>((resolve) => {
+      this.backendProcess!.once("exit", (code) => resolve(code));
+    });
+
+    const timeoutMs = 60000;
     const startedAt = Date.now();
     let delay = 500;
 
@@ -529,11 +546,27 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
         this.view?.webview.postMessage({ command: "system", message: "Backend ready." });
         return;
       }
+
+      // Check if the process already exited (crash on startup)
+      const exitCode = await Promise.race([
+        exitPromise,
+        new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 50)),
+      ]);
+      if (exitCode !== undefined) {
+        const snippet = stderrOutput.trim().split("\n").slice(-10).join("\n");
+        throw new Error(
+          `Backend process exited (code ${exitCode}) before becoming healthy.\n${snippet}`
+        );
+      }
+
       await new Promise((resolve) => setTimeout(resolve, delay));
       delay = Math.min(delay * 1.5, 2000);
     }
 
-    throw new Error("Backend did not become ready in time.");
+    const snippet = stderrOutput.trim().split("\n").slice(-10).join("\n");
+    throw new Error(
+      `Backend did not become ready in time (${timeoutMs / 1000}s).${snippet ? "\n" + snippet : ""}`
+    );
   }
 
   private async isBackendHealthy(backendUrl: string): Promise<boolean> {
@@ -886,6 +919,33 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
     .btn-success:hover  { background: #3a8a3a; }
     .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
+    /* ── New-chat confirm overlay ────────────────────────────────── */
+    .nc-overlay {
+      display: none;
+      position: fixed; inset: 0; z-index: 999;
+      background: rgba(0,0,0,0.45);
+      align-items: center; justify-content: center;
+    }
+    .nc-modal {
+      background: var(--vscode-sideBar-background, #252526);
+      border: 1px solid var(--vscode-widget-border, #3e3e42);
+      border-radius: 6px;
+      padding: 20px 20px 16px;
+      width: 240px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.5);
+    }
+    .nc-msg {
+      margin: 0 0 16px;
+      font-size: 12px;
+      line-height: 1.6;
+      color: var(--vscode-foreground, #cccccc);
+      text-align: center;
+    }
+    .nc-msg strong { color: #f48771; font-weight: 600; }
+    .nc-actions {
+      display: flex; gap: 8px; justify-content: flex-end;
+    }
+
     /* ── System messages ─────────────────────────────────────────── */
     .sys-msg { padding: 2px 12px; font-size: 11px; color: #6a6a6a; }
     .sys-msg.ok   { color: #4a9d4a; }
@@ -1129,6 +1189,52 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
       text-align: center;
     }
 
+    /* ── Top bar ─────────────────────────────────────────────────── */
+    .top-bar {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      padding: 4px 8px;
+      flex-shrink: 0;
+    }
+
+    .new-chat-btn {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      padding: 4px 9px;
+      background: transparent;
+      border: 1px solid transparent;
+      border-radius: 5px;
+      color: #6a6a6a;
+      cursor: pointer;
+      font-size: 11px;
+      font-family: inherit;
+      font-weight: 500;
+      letter-spacing: 0.02em;
+      transition: color 0.15s, border-color 0.15s, background 0.15s;
+      white-space: nowrap;
+    }
+
+    .new-chat-btn:hover {
+      color: #cccccc;
+      border-color: #3e3e42;
+      background: #2a2d2e;
+    }
+
+    .new-chat-btn svg {
+      width: 13px;
+      height: 13px;
+      flex-shrink: 0;
+      stroke: currentColor;
+      fill: none;
+    }
+
+    .new-chat-btn:disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+    }
+
     /* ── Animations ──────────────────────────────────────────────── */
     @keyframes fadeSlideIn {
       from { opacity: 0; transform: translateY(6px); }
@@ -1140,6 +1246,16 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
 </head>
 <body>
   <div class="shell">
+    <div class="top-bar">
+      <button class="new-chat-btn" id="newChatBtn" title="New chat — clear conversation">
+        <svg viewBox="0 0 16 16" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="8" y1="2" x2="8" y2="14"/>
+          <line x1="2" y1="8" x2="14" y2="8"/>
+        </svg>
+        New chat
+      </button>
+    </div>
+
     <div class="progress-bar-wrap">
       <div class="progress-bar" id="progressBar"></div>
     </div>
@@ -1189,6 +1305,16 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
     </div>
   </div>
 
+  <div id="newChatConfirm" class="nc-overlay">
+    <div class="nc-modal">
+      <p class="nc-msg">A build is currently running.<br>Starting a new chat will <strong>stop execution</strong>.<br>Continue?</p>
+      <div class="nc-actions">
+        <button id="newChatConfirmOk"     class="btn btn-danger">Stop &amp; New Chat</button>
+        <button id="newChatConfirmCancel" class="btn btn-secondary">Keep Running</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     const vscode = acquireVsCodeApi();
     const feed         = document.getElementById('feed');
@@ -1202,6 +1328,18 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
     const filesPanelSummary = document.getElementById('filesPanelSummary');
     const fpKeepBtn    = document.getElementById('fpKeepBtn');
     const fpUndoBtn    = document.getElementById('fpUndoBtn');
+    const newChatBtn        = document.getElementById('newChatBtn');
+    const newChatConfirmEl  = document.getElementById('newChatConfirm');
+    const newChatConfirmOk  = document.getElementById('newChatConfirmOk');
+    const newChatConfirmCancel = document.getElementById('newChatConfirmCancel');
+
+    newChatConfirmOk.addEventListener('click', () => {
+      newChatConfirmEl.style.display = 'none';
+      doNewChat();
+    });
+    newChatConfirmCancel.addEventListener('click', () => {
+      newChatConfirmEl.style.display = 'none';
+    });
 
     let currentRunId     = null;
     let ws               = null;
@@ -1444,6 +1582,7 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
 
     sendBtn.addEventListener('click', send);
     stopBtn.addEventListener('click', stop);
+    newChatBtn.addEventListener('click', newChat);
 
     // ── Running state ─────────────────────────────────────────────
     function setRunning(running) {
@@ -1949,6 +2088,57 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
       if (!currentRunId) return;
       vscode.postMessage({ command: 'cancelRun', runId: currentRunId });
       addSysMsg('Cancellation requested...', 'warn');
+    }
+
+    function newChat() {
+      if (isRunning && currentRunId) {
+        newChatConfirmEl.style.display = 'flex';
+        return;
+      }
+      doNewChat();
+    }
+
+    function doNewChat() {
+      // Cancel any in-flight run first
+      if (isRunning && currentRunId) {
+        vscode.postMessage({ command: 'cancelRun', runId: currentRunId });
+      }
+
+      // Reset all runtime state
+      currentRunId = null;
+      generatedFiles = [];
+      projectDir = null;
+      currentIteration = 0;
+      lastAgent = null;
+      _lastRowAc = null;
+      promptHistory = [];
+      historyIndex = -1;
+      historyDraft = '';
+      if (ws) { ws.close(); ws = null; }
+
+      // Reset UI
+      setRunning(false);
+      clearProgress();
+      resetFilesPanel();
+      inputEl.value = '';
+      inputEl.style.height = 'auto';
+
+      // Clear feed and restore empty state
+      feed.innerHTML = '';
+      const emptyDiv = document.createElement('div');
+      emptyDiv.className = 'empty';
+      emptyDiv.id = 'emptyState';
+      emptyDiv.innerHTML =
+        '<svg class="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">' +
+        '<path stroke-linecap="round" stroke-linejoin="round" d="M9.75 3.104v5.714a2.25 2.25 0 0 1-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 0 1 4.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3M14.25 3.104c.251.023.501.05.75.082M19.8 15.3l-1.57.393A9.065 9.065 0 0 1 12 15a9.065 9.065 0 0 0-6.23-.693L5 14.5m14.8.8 1.402 1.402c1.232 1.232.65 3.318-1.067 3.611A48.309 48.309 0 0 1 12 21a48.25 48.25 0 0 1-8.135-.687c-1.718-.293-2.3-2.379-1.067-3.61L5 14.5" /></svg>' +
+        '<h2>JAME Orchestrator</h2>' +
+        '<p>Describe what you want to build. The multi-agent pipeline will architect, code, and validate it.</p>';
+      feed.appendChild(emptyDiv);
+
+      // Wipe persisted state so it doesn't restore on panel move
+      vscode.setState(null);
+
+      inputEl.focus();
     }
 
     // ── WebSocket events ──────────────────────────────────────────
