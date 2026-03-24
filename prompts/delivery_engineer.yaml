@@ -65,23 +65,31 @@ generate:
     You will receive the file path to generate, the application specifications,
     the source file list, and a hint describing the file's role and purpose.
 
+    ## Tech stack rule — CRITICAL
+    Read the tech stack from the application specifications. Use the correct language runtime,
+    package manager, linter, and test runner for that stack. Examples:
+    - Python → pip, ruff, pytest, setup-python action
+    - Node.js → npm/yarn/pnpm, eslint, jest/vitest, setup-node action
+    - Go → go test, golangci-lint, setup-go action
+    Never assume Python unless the specs explicitly state Python.
+
     ## Output rules
     - Return ONLY raw file content. No markdown fences, no preamble, no explanation.
+    - The very first character of your response must be the first character of the file.
     - Content must be complete and production-ready — no TODOs or stubs.
     - Derive all project-specific values (name, services) from the specifications.
 
     ## CI rules
     - Workflow must be valid YAML runnable on GitHub Actions without modification.
     - Use only the pinned action SHAs provided — never use `latest` tags.
-    - Dev tooling (ruff, pytest, pip-audit) stays in CI only — never in runtime deps.
+    - Dev tooling stays in CI only — never in runtime deps.
 
     ## Developer helper files
-    Always generate the following companion files alongside the CI workflow to make
-    local development self-contained and contributor-friendly:
-    - Makefile             — one-command shortcuts (install, lint, test, format, check)
-    - requirements-dev.txt — dev/test deps (pytest, ruff, pip-audit)
-    - pyproject.toml       — project metadata + ruff linter/formatter config
-    - .gitignore           — Python-tailored ignore rules
+    Generate companion files appropriate for the tech stack in the specs:
+    - Makefile / package.json scripts — one-command shortcuts (install, lint, test, format, check)
+    - Dev dependency file (requirements-dev.txt, package.json devDependencies, etc.)
+    - Linter/formatter config appropriate for the language
+    - .gitignore tailored for the tech stack
 
   cd_system: |
     You are the DevOps Agent (CD generation phase) of a multi-agent software factory.
@@ -89,8 +97,18 @@ generate:
     You will receive the file path to generate, the application specifications,
     the source file list, and a hint describing the file's role and purpose.
 
+    ## Tech stack rule — CRITICAL
+    Read the tech stack from the application specifications. Use the correct base image,
+    package manager, and runtime for that stack in Dockerfiles and docker-compose files.
+    Examples:
+    - Python → python:3.12-slim, pip install
+    - Node.js → node:20-alpine, npm install / npm ci
+    - Go → golang:1.22-alpine builder + scratch/distroless final
+    Never assume Python unless the specs explicitly state Python.
+
     ## Output rules
     - Return ONLY raw file content. No markdown fences, no preamble, no explanation.
+    - The very first character of your response must be the first character of the file.
     - Content must be complete and production-ready — no TODOs or stubs.
     - Derive all project-specific values (name, port, services) from the specifications.
 
@@ -109,21 +127,23 @@ file_hint:
     Generate a GitHub Actions CI workflow (.github/workflows/ci.yml).
     The workflow name MUST be exactly: "CI"
     Trigger on push and pull_request to main. Use concurrency to cancel duplicate runs.
-    Two parallel jobs:
-      lint: checkout → setup-python 3.12 → pip install requirements-dev.txt → ruff check + ruff format --check
-      test: checkout → setup-python matrix [3.11, 3.12] → pip cache → pip install backend/requirements.txt + requirements-dev.txt → pytest → pip-audit → pip-audit --format cyclonedx -o sbom.json (upload as artifact)
+    Derive the language runtime, package manager, linter, and test runner from the application specs.
+    Two parallel jobs: lint and test. Use the correct setup action for the runtime (setup-node, setup-python, setup-go, etc.).
     Use ONLY these exact pinned action references — never substitute other versions:
       checkout:     {checkout}
       setup-python: {setup_python}
       cache:        {cache}
+    For non-Python runtimes use the equivalent setup action (e.g. actions/setup-node@v4 for Node.js).
 
-  requirements_dev: |
-    Generate requirements-dev.txt with dev/test dependencies only.
-    Always include: pytest, ruff, pip-audit.
-    Add pytest-cov if tests are present, httpx if the project is a FastAPI/Starlette service.
-    Do NOT specify any dependency version. No runtime dependencies — those belong in backend/requirements.txt.
+  dev_deps: |
+    Generate a dev/test dependency file appropriate for the tech stack from the specs.
+    - Python → requirements-dev.txt with pytest, ruff, pip-audit (no versions, no runtime deps)
+    - Node.js → package.json devDependencies section with jest/vitest, eslint, prettier
+    - Go → no extra file needed (go test is built-in)
+    Do NOT mix package managers or include runtime dependencies.
 
   pyproject_toml: |
+    Only generate this file if the project is Python-based (check specs first).
     Generate pyproject.toml with [project] (name from specs, version 0.1.0, requires-python >=3.11).
     Use proper TOML sub-table structure: [tool.ruff], [tool.ruff.lint], [tool.ruff.format],
     [tool.ruff.lint.per-file-ignores], [tool.ruff.lint.pydocstyle], [tool.ruff.lint.isort].
@@ -133,28 +153,28 @@ file_hint:
     format.quote-style = "double". pydocstyle.convention = "google".
 
   gitignore: |
-    Generate a .gitignore for a Python project.
-    Cover: bytecode and cache directories, virtual environments, build/dist artifacts,
-    secrets (.env files), tool caches (mypy, ruff, pytest, coverage),
-    and common IDE directories (.idea, .vscode).
+    Generate a .gitignore tailored for the tech stack from the specs.
+    - Python → bytecode/cache, venv, build/dist, .env, tool caches, IDE dirs
+    - Node.js → node_modules, dist, build, .env, coverage, IDE dirs
+    - Go → binary outputs, vendor, .env, IDE dirs
+    Always include: .env, common IDE directories (.idea, .vscode).
 
   makefile: |
-    Generate a Makefile with developer shortcuts.
+    Generate a Makefile with developer shortcuts appropriate for the tech stack from the specs.
     CRITICAL: every recipe line must start with a real TAB character (ASCII 0x09), not spaces.
-    Activate venv before every command with: source venv/bin/activate && <command>
     Prefix every recipe line with @ to suppress echoing. Print a description with @echo first.
-    Declare all targets in .PHONY: help, create-venv, install, install-dev,
-    format, lint-with-auto-fix, lint-with-auto-unsafe-fix, test, check.
+    Use the correct commands for the language (pip/npm/go, pytest/jest/go test, ruff/eslint, etc.)
+    Declare all targets in .PHONY: help, install, lint, test, format, check.
 
   # ── CD files ─────────────────────────────────────────────────────────────────
 
   dockerfile: |
-    Generate a multi-stage Dockerfile. Use python:3.12-slim for both stages.
-    Pin the base image by digest for production hardening (e.g. python:3.12-slim@sha256:<digest>).
-    If the exact digest is unknown, use the tag python:3.12-slim and add a comment: # TODO: pin to digest for production.
-    Stage 1 (builder): RUN python -m venv /venv then /venv/bin/pip install from backend/requirements.txt.
-    Stage 2 (final): COPY --from=builder /venv /venv, set ENV PATH="/venv/bin:$PATH",
-    install curl (for HEALTHCHECK) before switching to a non-root user, COPY source, EXPOSE port.
+    Generate a multi-stage Dockerfile. Derive the base image and build steps from the tech stack in the specs:
+    - Python  → python:3.12-slim builder + python:3.12-slim final; pip install deps; CMD uvicorn/gunicorn/python
+    - Node.js → node:20-alpine builder (npm ci --omit=dev); node:20-alpine final; CMD node
+    - Go      → golang:1.22-alpine builder (go build); scratch or distroless final; CMD ./app
+    Pin base images to a digest if known, otherwise add a comment: # TODO: pin to digest for production.
+    In the final stage: switch to a non-root user, install curl for HEALTHCHECK, COPY source, EXPOSE port.
     Add curl-based HEALTHCHECK. Set CMD to the correct entrypoint derived from specs.
 
   docker_compose: |
@@ -178,9 +198,11 @@ file_hint:
 
   dockerignore: |
     Generate a .dockerignore file. Output raw lines only — no filename header, no markdown, no fences.
-    Exclude: virtual environments (venv/, .venv/), Python bytecode and cache (__pycache__/, *.pyc),
-    git directory (.git/), test directories, build/dist artifacts, secrets (.env),
-    and documentation files (*.md).
+    Exclude: .git/, test directories, build/dist artifacts, secrets (.env), documentation (*.md).
+    Add language-specific exclusions based on the tech stack from the specs:
+    - Python  → venv/, .venv/, __pycache__/, *.pyc, *.pyo
+    - Node.js → node_modules/, coverage/, *.log
+    - Go      → vendor/ (if using vendoring)
 
   cd_workflow: |
     Generate a GitHub Actions CD workflow (.github/workflows/cd.yml).

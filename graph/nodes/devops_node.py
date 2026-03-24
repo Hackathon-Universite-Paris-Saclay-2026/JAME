@@ -33,7 +33,7 @@ from utils.node import get_mode_preamble, maybe_compress, run_parallel
 
 _CI_FILE_HINTS: dict[str, str] = {
     ".github/workflows/ci.yml": FILE_HINT["ci_workflow"],
-    "requirements-dev.txt": FILE_HINT["requirements_dev"],
+    "requirements-dev.txt": FILE_HINT["dev_deps"],
     "pyproject.toml": FILE_HINT["pyproject_toml"],
     ".gitignore": FILE_HINT["gitignore"],
     "Makefile": FILE_HINT["makefile"],
@@ -253,15 +253,43 @@ def _collect_file_tasks(
     return tasks, meta
 
 
-def _is_degenerate(content: str, file_path: str) -> bool:
-    """Return True when the LLM returned a placeholder instead of real content.
+_REASONING_LEAK_PHRASES = (
+    "the user provided",
+    "the specifications",
+    "this is a critical",
+    "however, the generated",
+    "the correct approach",
+    "the assistant should",
+    "i need to",
+    "i will ",
+    "let me ",
+    "note that",
+    "as per the",
+    "it seems",
+    "the user might",
+    "this would be",
+)
 
-    Catches the case where deepseek-r1 echoes the filename (or its basename)
-    into the content field instead of generating actual file content.
+
+def _is_degenerate(content: str, file_path: str) -> bool:
+    """Return True when the LLM returned a placeholder or reasoning instead of real content.
+
+    Catches:
+    - deepseek-r1 echoing the filename instead of generating content
+    - LLM outputting reasoning/analysis prose instead of file content
     """
     stripped = content.strip()
     basename = file_path.split("/")[-1]
-    return stripped in (file_path, basename) or len(stripped) < 10
+    if stripped in (file_path, basename) or len(stripped) < 10:
+        return True
+    # Detect reasoning leak: prose starting with analysis instead of code/config
+    first = stripped[:300].lower()
+    code_starters = ("#!", "#", "//", "/*", "package ", "import ", "from ", "const ",
+                     "let ", "var ", "function ", "class ", "module", "def ", "{", "[",
+                     "---", "version:", "name:", "from ", "run ", "copy ", "<")
+    if any(first.startswith(s) for s in code_starters):
+        return False
+    return any(phrase in first for phrase in _REASONING_LEAK_PHRASES)
 
 
 def _generate_file(

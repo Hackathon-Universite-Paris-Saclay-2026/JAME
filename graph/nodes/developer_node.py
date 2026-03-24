@@ -371,6 +371,62 @@ def _build_file_prompt(
     return msg
 
 
+_REASONING_LEAK_PHRASES = (
+    "the user provided",
+    "the specifications",
+    "this is a critical",
+    "however, the generated",
+    "the correct approach",
+    "the assistant should",
+    "i need to",
+    "i will ",
+    "let me ",
+    "note that",
+    "as per the",
+    "it seems",
+    "the user might",
+    "this would be",
+)
+
+
+def _looks_like_reasoning(content: str) -> bool:
+    """Return True if the content starts with LLM reasoning prose instead of file content."""
+    first = content.lstrip()[:300].lower()
+    # Code/config files start with keywords, punctuation, or specific characters
+    code_starters = ("#!", "#", "//", "/*", "package ", "import ", "from ", "const ",
+                     "let ", "var ", "function ", "class ", "module", "def ", "{", "[",
+                     "---", "version:", "name:", "FROM ", "RUN ", "COPY ", "<")
+    if any(first.startswith(s.lower()) for s in code_starters):
+        return False
+    return any(phrase in first for phrase in _REASONING_LEAK_PHRASES)
+
+
+def _strip_reasoning_leak(
+    llm: BaseChatModel, file_path: str, content: str, original_prompt: str
+) -> str:
+    """If content looks like reasoning prose, retry with a strict raw-only prompt."""
+    if not _looks_like_reasoning(content):
+        return content
+
+    _log("high", "ACT", f"Reasoning leak detected for {file_path} — retrying raw")
+    messages = [
+        SystemMessage(content=(
+            "Output ONLY the raw file content. "
+            "Do not write any explanation, analysis, or reasoning. "
+            "The very first character must be the first character of the file."
+        )),
+        HumanMessage(content=original_prompt),
+    ]
+    try:
+        _, retried = strip_thinking(llm.invoke(messages).content)
+        retried = _strip_markdown_fences(retried)
+        if retried.strip() and not _looks_like_reasoning(retried):
+            return retried
+    except Exception:
+        pass
+    return content  # return original if retry also fails
+
+
 def _generate_file(
     llm: BaseChatModel,
     file_path: str,
@@ -397,6 +453,12 @@ def _generate_file(
     content = _strip_markdown_fences(content)
     if not content.strip():
         _log("high", "ACT", f"Empty content for {file_path}, skipping")
+        return None
+
+    # Detect reasoning/analysis leak — LLM outputting prose instead of file content.
+    # Triggered when the response starts with natural-language sentences (not code/config).
+    content = _strip_reasoning_leak(llm, file_path, content, user_msg)
+    if not content:
         return None
 
     if project_dir is not None:
