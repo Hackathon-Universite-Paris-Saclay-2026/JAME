@@ -5,14 +5,14 @@ Implements an AIDLC-inspired four-phase workflow:
   Phase 1  —  Functional Design: extract domain entities, business rules,
               and component dependencies from the specs (technology-agnostic).
   Phase 2  —  File Planning: determine which files to generate, in strict
-              dependency order.
+              dependency order (driven by the Architect's specs).
   Phase 3  —  Code Generation: generate each file individually, passing
               already-generated dependency files as cross-reference context.
   Phase 4  —  Self-Validation: check consistency across all generated files
               before handing off to QA.
 
-Architecture enforced across all generated projects:
-  Router -> Service -> Repository/DB -> Model
+The developer does NOT hardcode any tech stack — it derives language, framework,
+and project structure entirely from the Architect's specifications.
 """
 
 from __future__ import annotations
@@ -24,15 +24,11 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from cancel_token import raise_if_cancelled
 from graph.prompts.developer_prompts import (
-    COMPONENT_HINT,
-    FILE_CONTEXT,
     FUNCTIONAL_DESIGN_SYSTEM_PROMPT,
     GENERATE_SYSTEM_PROMPT,
     LIGHTWEIGHT_GENERATE_SYSTEM_PROMPT,
     LIGHTWEIGHT_PLAN_SYSTEM_PROMPT,
     PLAN_SYSTEM_PROMPT,
-    ROUTER_HINT,
-    SERVICE_HINT,
     VALIDATE_SYSTEM_PROMPT,
 )
 from graph.state import (
@@ -50,119 +46,127 @@ from integrations.cortex import get_cortex_llm
 # Constants
 # ---------------------------------------------------------------------------
 
-MANDATORY_FILES = [
-    "backend/main.py",
-    "backend/database.py",
-    "backend/models.py",
-    "backend/requirements.txt",
-    "tests/conftest.py",
-    "tests/test_main.py",
-    "frontend/src/App.js",
-    "frontend/package.json",
-]
-
-LAYER_ORDER: list[tuple[str, int]] = [
-    ("backend/database.py", 0),
-    ("backend/models.py", 1),
-    ("backend/services/", 2),
-    ("backend/routers/", 3),
-    ("backend/main.py", 4),
-    ("backend/requirements.txt", 5),
-    ("frontend/package.json", 6),
-    ("frontend/src/App.js", 7),
-    ("frontend/src/components/", 8),
-    ("tests/conftest.py", 9),
-    ("tests/", 10),
-]
-
-IMPORT_GRAPH: dict[str, list[str]] = {
-    "backend/main.py": ["backend/routers/*", "backend/database.py"],
-    "backend/routers/*.py": [
-        "backend/services/*.py",
-        "backend/models.py",
-        "backend/database.py",
-    ],
-    "backend/services/*.py": ["backend/models.py", "backend/database.py"],
-    "backend/models.py": [],
-    "backend/database.py": ["backend/models.py"],
-    "tests/conftest.py": ["backend/main.py", "backend/database.py"],
-    "tests/*.py": [
-        "backend/main.py",
-        "backend/database.py",
-        "tests/conftest.py",
-    ],
-    "frontend/src/components/*": ["(props only — no cross-component imports)"],
-    "frontend/src/App.js": ["frontend/src/components/*"],
-}
-
-DEPENDENCY_MAP: dict[str, list[str]] = {
-    "backend/models.py": ["backend/database.py"],
-    "backend/services/*.py": ["backend/models.py", "backend/database.py"],
-    "backend/routers/*.py": [
-        "backend/services/*.py",
-        "backend/models.py",
-        "backend/database.py",
-    ],
-    "backend/main.py": ["backend/routers/*.py", "backend/database.py"],
-    "tests/conftest.py": [
-        "backend/main.py",
-        "backend/database.py",
-        "backend/models.py",
-    ],
-    "tests/*.py": ["tests/conftest.py", "backend/main.py", "backend/models.py"],
-    "frontend/src/App.js": [],
-    "frontend/src/components/*": [],
-}
-
 LIGHTWEIGHT_SCOPES = ("function", "feature")
 
 _EXT_TO_LANG = {
+    # Python
     ".py": "python",
+    # JavaScript / TypeScript
     ".js": "javascript",
     ".jsx": "javascript",
+    ".mjs": "javascript",
     ".ts": "typescript",
     ".tsx": "typescript",
+    # Web
+    ".html": "html",
+    ".css": "css",
+    ".scss": "scss",
+    ".sass": "sass",
+    ".less": "less",
+    ".vue": "vue",
+    ".svelte": "svelte",
+    # Data / config
     ".json": "json",
     ".yaml": "yaml",
     ".yml": "yaml",
+    ".toml": "toml",
+    ".xml": "xml",
+    ".ini": "ini",
+    ".env": "text",
+    ".properties": "properties",
+    # Docs
     ".txt": "text",
     ".md": "markdown",
-    ".html": "html",
-    ".css": "css",
+    ".rst": "restructuredtext",
+    # Go
+    ".go": "go",
+    # Rust
+    ".rs": "rust",
+    # Java / Kotlin
+    ".java": "java",
+    ".kt": "kotlin",
+    ".kts": "kotlin",
+    ".gradle": "groovy",
+    # C / C++
+    ".c": "c",
+    ".h": "c",
+    ".cpp": "cpp",
+    ".hpp": "cpp",
+    ".cc": "cpp",
+    # C#
+    ".cs": "csharp",
+    # Ruby
+    ".rb": "ruby",
+    # PHP
+    ".php": "php",
+    # Swift
+    ".swift": "swift",
+    # Shell
+    ".sh": "bash",
+    ".bash": "bash",
+    ".zsh": "zsh",
+    # SQL
+    ".sql": "sql",
+    # Docker
+    ".dockerfile": "dockerfile",
+    # Elixir / Erlang
+    ".ex": "elixir",
+    ".exs": "elixir",
+    ".erl": "erlang",
+    # Scala
+    ".scala": "scala",
+    # Lua
+    ".lua": "lua",
+    # R
+    ".r": "r",
+    ".R": "r",
 }
 
-_FILE_MAX_TOKENS: dict[str, int] = {
-    # Config / manifest — plain lists, no logic
-    "backend/requirements.txt": 512,
-    "frontend/package.json": 512,
-    # App bootstrap — wires routers, no business logic
-    "backend/main.py": 2048,
-    # Test bootstrap — fixtures and shared helpers only
-    "tests/conftest.py": 2048,
-    # Structural foundation — can grow with many models/relations
-    "backend/database.py": 4000,
-    "backend/models.py": 4000,
+# ---------------------------------------------------------------------------
+# Per-file token budgets (tech-agnostic heuristic)
+# ---------------------------------------------------------------------------
+# Files whose role is "config / manifest" are short; files that contain real
+# business logic or test suites need more room.  We match by suffix or by
+# well-known file name so this works regardless of directory layout.
+
+_NAME_MAX_TOKENS: dict[str, int] = {
+    # Dependency manifests / config
+    "requirements.txt": 512,
+    "package.json": 512,
+    "go.mod": 512,
+    "Cargo.toml": 1024,
+    "pom.xml": 1024,
+    "build.gradle": 1024,
+    "pyproject.toml": 1024,
+    ".gitignore": 256,
+    ".env.example": 256,
 }
 
-# Path-prefix fallbacks when no exact match is found.
-_PREFIX_MAX_TOKENS: list[tuple[str, int]] = [
-    ("backend/routers/", 6000),
-    ("backend/services/", 7000),  # business logic — can be heavy
-    ("frontend/src/components/", 5000),
-    ("frontend/src/", 5000),
-    ("tests/", 8000),  # test suites need thorough coverage
-]
+_SUFFIX_MAX_TOKENS: dict[str, int] = {
+    ".json": 1024,
+    ".yaml": 1024,
+    ".yml": 1024,
+    ".toml": 1024,
+    ".xml": 2048,
+    ".md": 2048,
+    ".txt": 512,
+    ".sql": 4000,
+}
 
 _DEFAULT_MAX_TOKENS = 6000
 
 
 def _get_max_tokens(file_path: str) -> int:
     """Return the token budget for a given source file."""
-    if file_path in _FILE_MAX_TOKENS:
-        return _FILE_MAX_TOKENS[file_path]
-    for prefix, tokens in _PREFIX_MAX_TOKENS:
-        if file_path.startswith(prefix):
-            return tokens
+    name = PurePosixPath(file_path).name
+    if name in _NAME_MAX_TOKENS:
+        return _NAME_MAX_TOKENS[name]
+    suffix = PurePosixPath(file_path).suffix
+    if suffix in _SUFFIX_MAX_TOKENS:
+        return _SUFFIX_MAX_TOKENS[suffix]
+    # Test files tend to be longer
+    if name.startswith("test_") or name.endswith("_test.py") or "/test" in file_path:
+        return 8000
     return _DEFAULT_MAX_TOKENS
 
 
@@ -186,7 +190,16 @@ def _log(level: str, phase: str, msg: str) -> None:
 
 def _detect_language(path: str) -> str:
     """Infer the programming language from a file's extension."""
-    return _EXT_TO_LANG.get(PurePosixPath(path).suffix, "text")
+    suffix = PurePosixPath(path).suffix
+    if not suffix:
+        # Handle extensionless files like Dockerfile, Makefile, etc.
+        name = PurePosixPath(path).name.lower()
+        if name == "dockerfile":
+            return "dockerfile"
+        if name == "makefile":
+            return "makefile"
+        return "text"
+    return _EXT_TO_LANG.get(suffix, "text")
 
 
 def _strip_markdown_fences(content: str) -> str:
@@ -201,92 +214,27 @@ def _strip_markdown_fences(content: str) -> str:
     return content
 
 
-def _match_wildcard(file_path: str, mapping: dict[str, list[str]]) -> list[str]:
-    """Look up *file_path* in a dict whose keys may contain ``*`` wildcards."""
-    if file_path in mapping:
-        return mapping[file_path]
-    for pattern, value in mapping.items():
-        if "*" in pattern and file_path.startswith(pattern.split("*")[0]):
-            return value
-    return []
+def _resolve_generated_context(generated: dict[str, dict]) -> str:
+    """Build a cross-reference section from ALL already-generated files.
 
-
-def _layer_priority(file_path: str) -> int:
-    """Return the generation priority for *file_path* (lower = generated first)."""
-    for pattern, priority in LAYER_ORDER:
-        if file_path == pattern or file_path.startswith(pattern):
-            return priority
-    return 99
-
-
-def _sort_by_layer(file_paths: list[str]) -> list[str]:
-    """Sort file paths by architectural layer priority (bottom-up)."""
-    return sorted(file_paths, key=_layer_priority)
-
-
-def _get_file_hint(file_path: str) -> str:
-    """Return the generation hint for a given file path."""
-    if file_path in FILE_CONTEXT:
-        return FILE_CONTEXT[file_path]
-    if "routers/" in file_path:
-        return ROUTER_HINT
-    if "services/" in file_path:
-        return SERVICE_HINT
-    if "components/" in file_path:
-        return COMPONENT_HINT
-    return f"Generate the complete, production-quality content for: {file_path}"
-
-
-def _build_import_hint(file_path: str) -> str:
-    """Build a prompt section describing allowed local imports for a file."""
-    allowed = _match_wildcard(file_path, IMPORT_GRAPH)
-    if not allowed:
-        return (
-            "\n## Import constraints\n"
-            "This file has no allowed local imports. "
-            "Do NOT import from any other local module."
-        )
-    return (
-        "\n## Import constraints\n"
-        f"This file may only import from these local modules: {allowed}\n"
-        "Do NOT import from any other local module — this prevents circular dependencies."
-    )
-
-
-def _resolve_dependencies(file_path: str, generated: dict[str, dict]) -> str:
-    """Build a cross-reference context section with already-generated dependency content.
-
-    Instead of making the LLM guess function signatures and class names,
-    we pass the actual content of dependency files so it can match
-    interfaces exactly.
+    Instead of using a hardcoded dependency map, we pass all previously
+    generated files so the LLM can match interfaces exactly — regardless
+    of the tech stack.
     """
-    dep_patterns = _match_wildcard(file_path, DEPENDENCY_MAP)
-    if not dep_patterns:
+    if not generated:
         return ""
-
     sections: list[str] = []
-    for pattern in dep_patterns:
-        if "*" in pattern:
-            prefix = pattern.split("*")[0]
-            matching = {
-                p: f for p, f in generated.items() if p.startswith(prefix)
-            }
-        else:
-            matching = (
-                {pattern: generated[pattern]} if pattern in generated else {}
-            )
-
-        for dep_path, dep_file in matching.items():
-            content = dep_file.get("content", "")
-            if content:
-                if len(content) > 4000:
-                    content = content[:4000] + "\n# ... (truncated for brevity)"
-                sections.append(f"### {dep_path}\n```\n{content}\n```")
-
+    for path, file_dict in generated.items():
+        content = file_dict.get("content", "")
+        if not content:
+            continue
+        if len(content) > 4000:
+            content = content[:4000] + "\n# ... (truncated for brevity)"
+        sections.append(f"### {path}\n```\n{content}\n```")
     if not sections:
         return ""
     return (
-        "\n## Already-generated dependency files (use EXACT interfaces)\n"
+        "\n## Already-generated files (use EXACT interfaces)\n"
         "Match function signatures, class names, and field names exactly.\n\n"
         + "\n\n".join(sections)
     )
@@ -344,11 +292,12 @@ def _build_file_prompt(
     file_issues: str = "",
 ) -> str:
     """Assemble the full user message for generating one file."""
-    dep_context = _resolve_dependencies(file_path, generated)
+    dep_context = _resolve_generated_context(generated)
     if dep_context:
+        dep_count = dep_context.count("###")
         print(
-            f"[ACT]    \u21b3 Injecting {dep_context.count('###')} "
-            "dependency file(s) as context"
+            f"[ACT]    \u21b3 Injecting {dep_count} "
+            "already-generated file(s) as context"
         )
 
     msg = f"## Application Specifications\n{specs}\n\n"
@@ -356,8 +305,9 @@ def _build_file_prompt(
         msg += f"## Functional Design\n{functional_design}\n\n"
     msg += (
         f"## File to generate\nPath: `{file_path}`\n\n"
-        f"## Instructions\n{_get_file_hint(file_path)}"
-        f"{_build_import_hint(file_path)}"
+        f"## Instructions\n"
+        f"Generate the complete, production-quality content for: {file_path}\n"
+        f"Follow the tech stack and architecture defined in the specifications above."
         f"{dep_context}"
         f"{file_issues}"
     )
@@ -470,7 +420,11 @@ def _run_file_planning(
     qa_feedback: str,
     iteration: int,
 ) -> tuple[list[str], str]:
-    """Determine which files to generate. Returns ``(file_plan, plan_trace)``."""
+    """Determine which files to generate. Returns ``(file_plan, plan_trace)``.
+
+    The file plan is derived entirely from the Architect's specs — no
+    hardcoded mandatory files.
+    """
     file_plan: list[str] | None = None
 
     # Retry with structured QA issues — only regenerate flagged files.
@@ -484,12 +438,13 @@ def _run_file_planning(
             if iss["file"] != "GENERAL"
         }
         has_general = any(iss["file"] == "GENERAL" for iss in qa_issues)
-        file_plan = (
-            list(MANDATORY_FILES)
-            if (has_general or not flagged)
-            else list(flagged)
-        )
-        print(f"[PLAN] Files to (re)generate: {file_plan}")
+        if has_general or not flagged:
+            # GENERAL issues or no specific files → re-plan everything
+            file_plan = None
+        else:
+            file_plan = list(flagged)
+        if file_plan is not None:
+            print(f"[PLAN] Files to (re)generate: {file_plan}")
 
     # Retry with legacy string feedback — regenerate everything.
     elif qa_feedback and iteration > 0:
@@ -523,18 +478,12 @@ def _run_file_planning(
             file_plan = [_sanitize_path(f) for f in result.files]
         except Exception as e:
             _log(
-                "medium",
+                "high",
                 "PLAN",
-                f"Structured plan failed ({type(e).__name__}), using mandatory list.",
+                f"Structured plan failed ({type(e).__name__}). "
+                "Cannot proceed without a file plan.",
             )
-            file_plan = list(MANDATORY_FILES)
-
-        # Guarantee mandatory files are always present.
-        for mf in MANDATORY_FILES:
-            if not any(mf in fp for fp in file_plan):
-                file_plan.append(mf)
-
-    file_plan = _sort_by_layer(file_plan)
+            file_plan = []
 
     # Guarantee package.json for JavaScript/TypeScript projects.
     _js_exts = frozenset({".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx"})
@@ -544,7 +493,6 @@ def _run_file_planning(
     )
     if has_js and not has_pkg:
         file_plan.append("package.json")
-        file_plan = _sort_by_layer(file_plan)
         print("[PLAN] Injected missing package.json for JS/TS project.")
 
     print(
@@ -734,23 +682,6 @@ def _run_auto_fix(
 # ---------------------------------------------------------------------------
 
 
-def _resolve_all_generated(generated: dict[str, dict]) -> str:
-    """Build cross-reference from *all* already-generated files (lightweight path)."""
-    if not generated:
-        return ""
-    parts = [
-        f"### {p}\n```\n{f['content']}\n```"
-        for p, f in generated.items()
-        if f.get("content")
-    ]
-    if not parts:
-        return ""
-    return (
-        "\n## Already-generated files (use EXACT interfaces)\n"
-        + "\n\n".join(parts)
-    )
-
-
 def _run_lightweight(
     llm: BaseChatModel,
     scope: str,
@@ -800,7 +731,7 @@ def _run_lightweight(
         user_msg = (
             f"## Specifications\n{specs}\n\n"
             f"## File to generate\nPath: `{file_path}`"
-            f"{_resolve_all_generated(generated)}"
+            f"{_resolve_generated_context(generated)}"
         )
         content = _invoke_llm(
             llm,
@@ -843,6 +774,9 @@ def developer_node(state: AgentState) -> dict:
     Orchestrates four phases — Design, Plan, Generate, Validate — then
     returns updated state with ``functional_design``, ``code_files``, and
     ``reasoning_logs``.
+
+    The tech stack is derived entirely from the Architect's specs — no
+    framework is hardcoded.
     """
     raise_if_cancelled()
     print("\n" + "=" * 60)
@@ -853,15 +787,15 @@ def developer_node(state: AgentState) -> dict:
 
     _emit = state.get("emit_callback")
 
-    def _log(entry: dict) -> None:
+    def _log_emit(entry: dict) -> None:
         if _emit:
             _emit(entry)
 
-    _log(
+    _log_emit(
         {
             "agent": "developer",
             "phase": "plan",
-            "content": "Developer agent starting…",
+            "content": "Developer agent starting\u2026",
         }
     )
     llm = get_cortex_llm(model="deepseek-r1", temperature=0.2, max_tokens=8000)
@@ -884,11 +818,11 @@ def developer_node(state: AgentState) -> dict:
                 Path(lw_run_output_dir) / "output" / "project"
             ).resolve()
             lw_project_dir.mkdir(parents=True, exist_ok=True)
-        _log(
+        _log_emit(
             {
                 "agent": "developer",
                 "phase": "plan",
-                "content": f"Lightweight scope ({scope}) — minimal file set.",
+                "content": f"Lightweight scope ({scope}) \u2014 minimal file set.",
             }
         )
         code_files = _run_lightweight(llm, scope, specs, lw_project_dir)
@@ -896,7 +830,7 @@ def developer_node(state: AgentState) -> dict:
             ", ".join(f["path"] for f in code_files) if code_files else "(none)"
         )
         reason = f"Lightweight ({scope}): generated {len(code_files)} file(s): {file_list}"
-        _log(
+        _log_emit(
             {
                 "agent": "developer",
                 "phase": "act",
@@ -904,7 +838,7 @@ def developer_node(state: AgentState) -> dict:
             }
         )
         print(f"\n[REASON] {reason}\n")
-        _log({"agent": "developer", "phase": "reason", "content": reason})
+        _log_emit({"agent": "developer", "phase": "reason", "content": reason})
         return {
             "functional_design": "",
             "code_files": code_files,
@@ -927,11 +861,11 @@ def developer_node(state: AgentState) -> dict:
     raise_if_cancelled()
     functional_design = state.get("functional_design", "")
     if iteration == 0:
-        _log(
+        _log_emit(
             {
                 "agent": "developer",
                 "phase": "design",
-                "content": "Extracting functional design…",
+                "content": "Extracting functional design\u2026",
             }
         )
         functional_design = _run_functional_design(llm, specs)
@@ -942,15 +876,15 @@ def developer_node(state: AgentState) -> dict:
     else:
         design_trace = "Reusing functional design from previous iteration."
         print(f"\n[DESIGN] {design_trace}")
-    _log({"agent": "developer", "phase": "design", "content": design_trace})
+    _log_emit({"agent": "developer", "phase": "design", "content": design_trace})
 
     # ── Phase 2: File Planning ───────────────────────────────────
     raise_if_cancelled()
-    _log(
+    _log_emit(
         {
             "agent": "developer",
             "phase": "plan",
-            "content": "Planning files to generate…",
+            "content": "Planning files to generate\u2026",
         }
     )
     file_plan, plan_trace = _run_file_planning(
@@ -961,7 +895,7 @@ def developer_node(state: AgentState) -> dict:
         qa_feedback,
         iteration,
     )
-    _log({"agent": "developer", "phase": "plan", "content": plan_trace})
+    _log_emit({"agent": "developer", "phase": "plan", "content": plan_trace})
 
     # ── Phase 3: Code Generation ─────────────────────────────────
     run_output_dir = state.get("run_output_dir", "")
@@ -970,11 +904,11 @@ def developer_node(state: AgentState) -> dict:
         project_dir = (Path(run_output_dir) / "output" / "project").resolve()
         project_dir.mkdir(parents=True, exist_ok=True)
 
-    _log(
+    _log_emit(
         {
             "agent": "developer",
             "phase": "act",
-            "content": "Generating code files (dependency-ordered)…",
+            "content": "Generating code files (dependency-ordered)\u2026",
         }
     )
     existing_files = {f["path"]: f for f in state.get("code_files", [])}
@@ -989,7 +923,7 @@ def developer_node(state: AgentState) -> dict:
         iteration,
         project_dir,
     )
-    _log(
+    _log_emit(
         {
             "agent": "developer",
             "phase": "act",
@@ -998,11 +932,11 @@ def developer_node(state: AgentState) -> dict:
     )
 
     # ── Phase 4: Self-Validation ─────────────────────────────────
-    _log(
+    _log_emit(
         {
             "agent": "developer",
             "phase": "validate",
-            "content": "Running self-validation…",
+            "content": "Running self-validation\u2026",
         }
     )
     validation_issues = _run_self_validation(llm, code_files)
@@ -1028,7 +962,7 @@ def developer_node(state: AgentState) -> dict:
             "(auto-fix attempted)"
         )
     print(f"\n[REASON] {reason_trace}\n")
-    _log({"agent": "developer", "phase": "reason", "content": reason_trace})
+    _log_emit({"agent": "developer", "phase": "reason", "content": reason_trace})
 
     return {
         "functional_design": functional_design,
