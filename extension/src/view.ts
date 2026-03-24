@@ -163,6 +163,43 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
         return;
       }
 
+      if (msg.command === "saveSpecsFile") {
+        // Save specs to .jame/specs-review.md without opening it
+        const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (workspaceRoot && msg.fileContent !== undefined) {
+          const specsPath = path.join(workspaceRoot, ".jame", "specs-review.md");
+          fs.mkdirSync(path.dirname(specsPath), { recursive: true });
+          fs.writeFileSync(specsPath, msg.fileContent, "utf8");
+          this.view?.webview.postMessage({ command: "specsFilePath", filePath: specsPath });
+        }
+        return;
+      }
+
+      if (msg.command === "openSpecsFile") {
+        // Open the already-saved specs file in the editor
+        const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (workspaceRoot) {
+          const specsPath = msg.filePath ?? path.join(workspaceRoot, ".jame", "specs-review.md");
+          if (msg.fileContent !== undefined) {
+            fs.mkdirSync(path.dirname(specsPath), { recursive: true });
+            fs.writeFileSync(specsPath, msg.fileContent, "utf8");
+          }
+          const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(specsPath));
+          await vscode.window.showTextDocument(doc, { preview: false });
+          this.view?.webview.postMessage({ command: "specsFilePath", filePath: specsPath });
+        }
+        return;
+      }
+
+      if (msg.command === "readSpecsFile") {
+        // Read the edited specs file and send content back to webview
+        if (msg.filePath && fs.existsSync(msg.filePath)) {
+          const content = fs.readFileSync(msg.filePath, "utf8");
+          this.view?.webview.postMessage({ command: "specsFileContent", content });
+        }
+        return;
+      }
+
       if (msg.command === "openExerciseFile") {
         // Write the stub to disk and open it for editing (no diff — junior edits the stub directly)
         const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;

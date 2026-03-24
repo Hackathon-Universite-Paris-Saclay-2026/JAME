@@ -449,11 +449,13 @@ def architect_node(state: AgentState) -> dict:
                 )
                 # Emit a special specs_review_request event — reuse the
                 # clarification_callback so we don't need a new callback type.
-                # The payload carries the full specs so the UI can render them.
+                # Embed the full specs after a sentinel so service.py can
+                # extract and include it in the WebSocket payload.
                 _review_question = (
                     "Please review the generated specifications. "
                     "Reply 'approve' (or leave blank) to proceed, "
                     "or describe changes you want."
+                    "\n\n===SPECS_CONTENT===\n" + specs
                 )
                 answer = _specs_review_callback(
                     _review_question,

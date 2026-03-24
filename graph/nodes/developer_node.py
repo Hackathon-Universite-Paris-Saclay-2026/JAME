@@ -563,8 +563,15 @@ def _run_code_generation(
     qa_feedback: str,
     iteration: int,
     project_dir: Path | None = None,
+    emit_fn=None,
+    stream_files: bool = True,
 ) -> tuple[list[dict], dict[str, dict]]:
-    """Generate all planned files. Returns ``(code_files, generated_map)``."""
+    """Generate all planned files. Returns ``(code_files, generated_map)``.
+
+    If ``emit_fn`` is provided and ``stream_files`` is True, emits a
+    ``file_generated`` event immediately after each file is generated so the
+    UI can display files in real-time rather than waiting for the whole node.
+    """
     code_files: list[dict] = []
     generated: dict[str, dict] = {}
 
@@ -594,6 +601,17 @@ def _run_code_generation(
         if result:
             code_files.append(result)
             generated[file_path] = result
+            # Stream the file to the UI immediately (senior/expert modes only)
+            if emit_fn and stream_files:
+                emit_fn({
+                    "event": "file_generated",
+                    "agent": "developer",
+                    "phase": "CONSTRUCTION",
+                    "path": result.get("path", file_path),
+                    "content": result.get("content", ""),
+                    "language": result.get("language", "text"),
+                    "message": f"Generated: {result.get('path', file_path)}",
+                })
 
     # Preserve existing files that were not regenerated on retry.
     if iteration > 0 and existing_files:
@@ -1131,6 +1149,9 @@ def developer_node(state: AgentState) -> dict:
         }
     )
     existing_files = {f["path"]: f for f in state.get("code_files", [])}
+    # Stream files to UI in real-time for senior/expert modes; junior keeps files
+    # hidden until the exercise packager replaces them with stubs.
+    _stream_files = mode != "junior"
     code_files, generated = _run_code_generation(
         llm,
         file_plan,
@@ -1141,6 +1162,8 @@ def developer_node(state: AgentState) -> dict:
         qa_feedback,
         iteration,
         project_dir,
+        emit_fn=_emit,
+        stream_files=_stream_files,
     )
     _log(
         {

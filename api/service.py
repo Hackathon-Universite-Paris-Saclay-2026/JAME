@@ -214,27 +214,32 @@ class OrchestratorService:
         then back to RUNNING once the human responds.
         """
         future = self.store.request_clarification(run_id)
-        # Fetch the current specs from run state to include in payload
-        record = self.store.get_run(run_id)
-        specs_content = ""
-        if record:
-            specs_content = record.result.get("state", {}).get("specs", "")
+        # Extract specs content embedded by architect_node after the sentinel
+        _sentinel = "\n\n===SPECS_CONTENT===\n"
+        if _sentinel in question:
+            display_question, specs_content = question.split(_sentinel, 1)
+        else:
+            display_question = question
+            specs_content = ""
         self.store.update_status(run_id, RunStatus.AWAITING_SPECS_REVIEW)
         await self._emit(
             run_id,
             "specs_review_request",
-            question,
+            display_question,
             agent="architect",
             phase="specs_review",
             payload={
-                "question": question,
+                "question": display_question,
                 "options": options,
                 "specs": specs_content,
             },
         )
         try:
             answer = await asyncio.wait_for(future, timeout=300.0)
-        except TimeoutError:
+        except (TimeoutError, asyncio.CancelledError):
+            # TimeoutError: user didn't respond in time → treat as empty (auto-approve).
+            # CancelledError: run was cancelled while waiting → return empty so the
+            #   caller returns and the cancel token propagates RunCancelledError.
             answer = ""
         finally:
             record_after = self.store.get_run(run_id)
@@ -342,22 +347,42 @@ class OrchestratorService:
     def _make_emit_fn(
         self, run_id: str, loop: asyncio.AbstractEventLoop
     ) -> Callable[[dict], None]:
-        """Return a sync callable that immediately emits an agent_update event from node threads."""
+        """Return a sync callable that emits events from node worker threads.
+
+        Handles two event types based on the ``event`` key in the log dict:
+        - ``file_generated``: streams a generated file to the UI immediately.
+        - anything else (default): emits an ``agent_update`` event.
+        """
         svc = self
 
         def _emit_sync(log: dict) -> None:
-            coro = svc._emit(
-                run_id=run_id,
-                event="agent_update",
-                message=log.get("content", "Agent update"),
-                agent=log.get("agent"),
-                phase=log.get("phase"),
-                payload={
-                    **log,
-                    "thinking": log.get("thinking", ""),
-                    "has_thinking": bool(log.get("thinking", "")),
-                },
-            )
+            event_type = log.get("event", "agent_update")
+            if event_type == "file_generated":
+                coro = svc._emit(
+                    run_id=run_id,
+                    event="file_generated",
+                    message=log.get("message", f"Generated: {log.get('path', '')}"),
+                    agent=log.get("agent", "developer"),
+                    phase=log.get("phase", "CONSTRUCTION"),
+                    payload={
+                        "path": log.get("path", ""),
+                        "content": log.get("content", ""),
+                        "language": log.get("language", "text"),
+                    },
+                )
+            else:
+                coro = svc._emit(
+                    run_id=run_id,
+                    event="agent_update",
+                    message=log.get("content", "Agent update"),
+                    agent=log.get("agent"),
+                    phase=log.get("phase"),
+                    payload={
+                        **log,
+                        "thinking": log.get("thinking", ""),
+                        "has_thinking": bool(log.get("thinking", "")),
+                    },
+                )
             asyncio.run_coroutine_threadsafe(coro, loop)
 
         return _emit_sync
@@ -548,43 +573,24 @@ class OrchestratorService:
                                 },
                             )
                         else:
+                            # Files were already streamed in real-time via emit_callback
+                            # inside _run_code_generation. Just build emitted_paths and
+                            # fire files_ready so the UI knows generation is complete.
                             for cf in dev_files:
                                 p = (
                                     cf["path"]
                                     if isinstance(cf, dict)
                                     else cf.path
                                 )
-                                c = (
-                                    cf["content"]
-                                    if isinstance(cf, dict)
-                                    else cf.content
-                                )
-                                lang = (
-                                    cf.get("language", "text")
-                                    if isinstance(cf, dict)
-                                    else cf.language
-                                )
                                 if p:
                                     emitted_paths.append(
                                         str(project_dir_node / p)
                                     )
-                                await self._emit(
-                                    run_id=run_id,
-                                    event="file_generated",
-                                    message=f"Generated: {p}",
-                                    agent="developer",
-                                    phase="CONSTRUCTION",
-                                    payload={
-                                        "path": p,
-                                        "content": c,
-                                        "language": lang,
-                                    },
-                                )
 
                             await self._emit(
                                 run_id=run_id,
                                 event="files_ready",
-                                message=f"{len(emitted_paths)} file(s) written — review before QA continues",
+                                message=f"{len(emitted_paths)} file(s) ready",
                                 agent="developer",
                                 phase="CONSTRUCTION",
                                 payload={

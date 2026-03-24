@@ -97,23 +97,29 @@ body {
   word-break: break-word;
 }
 
-/* Agent log rows */
-/* Rows grow to fit content - tag/pill stay top-aligned */
+/* Agent group — wraps all consecutive rows from the same agent.
+   The continuous left border lives here so it never breaks. */
+.agent-group {
+  border: 1px solid transparent;
+  border-left-width: 3px;
+  border-radius: 5px;
+  margin: 3px 8px;
+  padding: 3px 0;
+  background: rgba(255,255,255,0.02);
+}
+.agent-group.ac-architect { border-color: rgba(74,159,212,0.25); border-left-color: #4a9fd4; }
+.agent-group.ac-developer { border-color: rgba(78,201,78,0.2);   border-left-color: #4ec94e; }
+.agent-group.ac-delivery  { border-color: rgba(212,194,74,0.2);  border-left-color: #d4c24a; }
+.agent-group.ac-qa        { border-color: rgba(192,74,192,0.2);  border-left-color: #c04ac0; }
+.agent-group.ac-system    { border-color: rgba(100,100,100,0.2); border-left-color: #666; }
+
+/* Agent log rows — no border here, inherited from group */
 .agent-row {
   display: flex; align-items: flex-start; gap: 6px;
-  padding: 2px 10px;
+  padding: 1px 10px;
   font-size: 11.5px;
-  animation: fadeSlideIn 0.15s ease forwards;
-  border-left: 2px solid transparent;
 }
 .agent-row:hover { background: rgba(255,255,255,0.03); }
-
-/* left accent by agent */
-.agent-row.ac-architect { border-left-color: #4a9fd4; }
-.agent-row.ac-developer { border-left-color: #4ec94e; }
-.agent-row.ac-delivery  { border-left-color: #d4c24a; }
-.agent-row.ac-qa        { border-left-color: #c04ac0; }
-.agent-row.ac-system    { border-left-color: #555; }
 
 /* Agent tag - short uppercase label, sized to content, top-aligned */
 .ar-tag {
@@ -127,7 +133,7 @@ body {
 .ac-delivery  .ar-tag { color: #d4c26a; }
 .ac-qa        .ar-tag { color: #c07ec0; }
 .ac-system    .ar-tag { color: #7a7a7a; }
-/* repeated agent on consecutive rows - dim the tag */
+/* repeated agent on consecutive rows - hide the redundant tag */
 .agent-row.same-agent .ar-tag { color: transparent; }
 
 /* Phase pill - stays on first line even if message wraps */
@@ -172,9 +178,10 @@ body {
   color: #6a6a9a; background: #0a0a1a;
   white-space: pre-wrap; word-break: break-word;
   max-height: 180px; overflow-y: auto; line-height: 1.5;
-  border-left: 2px solid #2a2a5a;
-  margin: 0 10px 2px;
-  border-radius: 0 0 4px 4px;
+  border: 1px solid rgba(42,42,90,0.6);
+  border-left: 3px solid #2a2a5a;
+  margin: 2px 10px 2px;
+  border-radius: 5px;
   animation: fadeSlideIn 0.15s ease forwards;
 }
 .ar-think-content.shown { display: block; }
@@ -389,26 +396,29 @@ body {
 .sys-msg.ok {
   color: #4a9d4a;
   background: rgba(74,157,74,0.06);
-  border-left: 2px solid #4a9d4a;
-  border-radius: 0 4px 4px 0;
-  padding: 6px 12px 6px 10px;
-  margin: 2px 8px;
+  border: 1px solid rgba(74,157,74,0.25);
+  border-left-width: 3px;
+  border-radius: 5px;
+  padding: 5px 10px;
+  margin: 3px 8px;
 }
 .sys-msg.warn {
   color: #d7ba7d;
   background: rgba(215,186,125,0.06);
-  border-left: 2px solid #d7ba7d;
-  border-radius: 0 4px 4px 0;
-  padding: 6px 12px 6px 10px;
-  margin: 2px 8px;
+  border: 1px solid rgba(215,186,125,0.25);
+  border-left-width: 3px;
+  border-radius: 5px;
+  padding: 5px 10px;
+  margin: 3px 8px;
 }
 .sys-msg.err  {
   color: #f48771;
   background: rgba(244,135,113,0.07);
-  border-left: 2px solid #f48771;
-  border-radius: 0 4px 4px 0;
-  padding: 6px 12px 6px 10px;
-  margin: 2px 8px;
+  border: 1px solid rgba(244,135,113,0.25);
+  border-left-width: 3px;
+  border-radius: 5px;
+  padding: 5px 10px;
+  margin: 3px 8px;
 }
 
 /* File card (legacy, kept for safety) */
@@ -697,9 +707,12 @@ body {
 
 /* Clarify summary (answered state) */
 .clarify-summary {
-  margin: 2px 10px;
-  padding: 5px 10px;
-  border-left: 2px solid #3e3e42;
+  margin: 4px 8px;
+  padding: 6px 10px;
+  border: 1px solid #3e3e42;
+  border-left: 3px solid #5a5a5e;
+  border-radius: 5px;
+  background: rgba(255,255,255,0.02);
   font-size: 11px; line-height: 1.5;
 }
 .clarify-summary .cs-q { color: #6a6a6a; }
@@ -921,65 +934,52 @@ textarea:disabled { opacity: 0.5; cursor: not-allowed; }
   border-radius: 8px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
 }
 
 .specs-review-header {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   font-size: 12px;
   font-weight: 600;
   color: #6db3f2;
 }
 
-.specs-review-icon { font-size: 14px; }
+.specs-review-icon {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+  vertical-align: middle;
+}
+
 .specs-review-title { letter-spacing: 0.03em; }
 
-.specs-review-question {
-  font-size: 12px;
-  color: #c9d1d9;
-  line-height: 1.5;
-}
-
-.specs-review-details {
-  border: 1px solid #2a4a8a;
-  border-radius: 5px;
-  overflow: hidden;
-}
-
-.specs-review-summary {
-  padding: 5px 10px;
+.specs-review-hint {
   font-size: 11px;
-  color: #6db3f2;
-  cursor: pointer;
-  background: #0d1f40;
-  user-select: none;
+  color: #8b949e;
+  line-height: 1.6;
 }
 
-.specs-review-summary:hover { background: #162a55; }
-
-.specs-review-content {
-  padding: 10px;
-  font-size: 11px;
+.specs-review-hint code {
   font-family: var(--vscode-editor-font-family, monospace);
-  color: #c9d1d9;
-  background: #0a1628;
-  white-space: pre-wrap;
-  word-break: break-word;
-  max-height: 300px;
-  overflow-y: auto;
-}
-
-.specs-review-feedback-row {
-  display: flex;
-  flex-direction: column;
+  background: #0d1f40;
+  border-radius: 3px;
+  padding: 1px 5px;
+  color: #6db3f2;
 }
 
 .specs-review-actions {
   display: flex;
-  gap: 6px;
+  gap: 8px;
   flex-wrap: wrap;
+}
+
+/* Make SVG + text sit on the same baseline inside btn */
+.specs-review-actions .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 /* ── Iteration Review Card (senior mode QA checkpoint) ───────────────── */

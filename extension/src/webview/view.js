@@ -650,6 +650,7 @@ function removeEmpty() {
 // User message bubble
 function addUserMessage(text) {
   removeEmpty();
+  breakAgentGroup();
   const div = document.createElement('div');
   div.className = 'user-msg';
   div.innerHTML = '<div class="user-bubble">' + escHtml(text) + '</div>';
@@ -660,6 +661,7 @@ function addUserMessage(text) {
 // System message
 const SYS_ICONS = { ok: '\u2713', warn: '\u26a0', err: '\u2715', info: '\u2139' };
 function addSysMsg(text, level) {
+  breakAgentGroup();
   const div = document.createElement('div');
   div.className = 'sys-msg ' + (level || 'info');
   div.innerHTML =
@@ -671,6 +673,7 @@ function addSysMsg(text, level) {
 
 // Agent log row
 let _lastRowAc = null;
+let _currentAgentGroup = null; // the group wrapper div for the current agent streak
 const AGENT_SHORT = {
   'architect':       'ARCH',
   'developer':       'DEV',
@@ -681,6 +684,12 @@ const AGENT_SHORT = {
   'exercise':        'EX',
   'system':          'SYS',
 };
+
+/** Call whenever a non-agent element (clarify card, sys msg, etc.) is added to the feed. */
+function breakAgentGroup() {
+  _lastRowAc = null;
+  _currentAgentGroup = null;
+}
 
 function addTlRow(agentDisplay, msg, thinking, phase) {
   removeEmpty();
@@ -695,7 +704,7 @@ function addTlRow(agentDisplay, msg, thinking, phase) {
     'system':    'ac-system',
   }[agentKey] || 'ac-system';
 
-  const isSame = _lastRowAc === acClass;
+  const isSame = _lastRowAc === acClass && _currentAgentGroup !== null;
   _lastRowAc = acClass;
 
   // "BUILD AND TEST" -> "BUILD_AND_TEST" -> phase-build_and_test
@@ -705,22 +714,29 @@ function addTlRow(agentDisplay, msg, thinking, phase) {
 
   const shortLabel = AGENT_SHORT[agentKey] || agentDisplay.slice(0, 4).toUpperCase();
 
+  // Create or reuse the agent group wrapper (holds the continuous left border)
+  if (!isSame) {
+    _currentAgentGroup = document.createElement('div');
+    _currentAgentGroup.className = 'agent-group ' + acClass + ' fade-in';
+    feed.appendChild(_currentAgentGroup);
+  }
+
   const row = document.createElement('div');
-  row.className = 'agent-row ' + acClass + (isSame ? ' same-agent' : '') + ' fade-in';
+  row.className = 'agent-row' + (isSame ? ' same-agent' : '');
   row.innerHTML =
     '<span class="ar-tag" title="' + escHtml(agentDisplay) + '">' + escHtml(shortLabel) + '</span>' +
     (normalizedPhase ? '<span class="ar-phase phase-' + normalizedPhase + '">' + escHtml(phase) + '</span>' : '') +
     '<span class="ar-msg">' + renderMd(msg) + '</span>' +
     (thinking ? '<button class="ar-think-btn">\u25b6 thinking</button>' : '');
 
-  feed.appendChild(row);
+  _currentAgentGroup.appendChild(row);
 
   if (thinking) {
     const btn = row.querySelector('.ar-think-btn');
     const thinkDiv = document.createElement('div');
     thinkDiv.className = 'ar-think-content';
     thinkDiv.textContent = thinking;
-    feed.appendChild(thinkDiv);
+    _currentAgentGroup.appendChild(thinkDiv);
 
     btn.addEventListener('click', () => {
       const shown = thinkDiv.classList.contains('shown');
@@ -746,12 +762,14 @@ function addFileDiffRow(filePath, linesAdded, linesRemoved) {
   row.querySelector('.file-diff-name').addEventListener('click', () => {
     vscode.postMessage({ command: 'openProposedChange', filePath: filePath, fileContent: '' });
   });
-  feed.appendChild(row);
+  // Append inside the current agent group if one exists, else directly to feed
+  (_currentAgentGroup || feed).appendChild(row);
   scrollFeed();
 }
 
 // Iteration separator
 function addIterSep(label) {
+  breakAgentGroup();
   const div = document.createElement('div');
   div.className = 'iter-sep fade-in';
   div.innerHTML =
@@ -800,6 +818,7 @@ function showInlineDiff(filePath) {
 
 // QA verdict
 function showVerdict(passed) {
+  breakAgentGroup();
   const div = document.createElement('div');
   div.className = 'verdict fade-in ' + (passed ? 'pass' : 'fail');
   div.textContent = passed
@@ -843,6 +862,7 @@ tcModalOverlay.querySelector('.tc-modal-enable').addEventListener('click', () =>
 });
 
 function showToolCallCard(data) {
+  breakAgentGroup();
   const payload      = (data && data.payload) || {};
   const toolName     = payload.tool_name || 'tool';
   const cmdBin       = payload.command   || toolName;
@@ -958,6 +978,7 @@ function _tcSettle(card, actionsEl, toolCallId, action, isAuto) {
 }
 
 function showClarificationCard(question, options) {
+  breakAgentGroup();
   const opts = options && options.length > 0 ? options : [];
   let page = 0;
   let selectedOpt = null;
@@ -1070,80 +1091,79 @@ function showClarificationCard(question, options) {
   scrollFeed();
 }
 
-// Specs review card — approve or request revision
+// Specs review card — approve or request revision via edited MD file
+let _specsFilePath = null;         // set when view.ts confirms the file was written
+let _pendingReviseFromFile = null; // { originalSpecs, settle } — set while waiting for readSpecsFile response
+
 function showSpecsReviewCard(question, specs) {
+  breakAgentGroup();
   const card = document.createElement('div');
   card.className = 'specs-review-card fade-in';
 
+  // Header
   const header = document.createElement('div');
   header.className = 'specs-review-header';
   header.innerHTML =
-    '<span class="specs-review-icon">&#128196;</span>' +
+    '<svg class="specs-review-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">' +
+      '<rect x="2" y="1" width="10" height="14" rx="1.5"/>' +
+      '<line x1="4.5" y1="5" x2="9.5" y2="5"/>' +
+      '<line x1="4.5" y1="8" x2="9.5" y2="8"/>' +
+      '<line x1="4.5" y1="11" x2="7.5" y2="11"/>' +
+    '</svg>' +
     '<span class="specs-review-title">Specifications Review</span>';
   card.appendChild(header);
 
-  const qEl = document.createElement('div');
-  qEl.className = 'specs-review-question';
-  qEl.textContent = question;
-  card.appendChild(qEl);
+  // Save the file immediately to workspace so user can see it right away
+  vscode.postMessage({ command: 'saveSpecsFile', fileContent: specs });
 
-  if (specs) {
-    const details = document.createElement('details');
-    details.className = 'specs-review-details';
-    const summary = document.createElement('summary');
-    summary.className = 'specs-review-summary';
-    summary.textContent = 'View specifications';
-    details.appendChild(summary);
-    const pre = document.createElement('pre');
-    pre.className = 'specs-review-content';
-    pre.textContent = specs;
-    details.appendChild(pre);
-    card.appendChild(details);
-  }
+  // Instruction
+  const hint = document.createElement('div');
+  hint.className = 'specs-review-hint';
+  hint.innerHTML =
+    'The specifications have been saved to <code>.jame/specs-review.md</code> in your workspace. ' +
+    'Open the file, edit if needed, then confirm below.';
+  card.appendChild(hint);
 
-  const feedbackRow = document.createElement('div');
-  feedbackRow.className = 'specs-review-feedback-row';
-  feedbackRow.style.display = 'none';
-  const feedbackArea = document.createElement('textarea');
-  feedbackArea.className = 'clarify-text';
-  feedbackArea.placeholder = 'Describe what you want changed…';
-  feedbackArea.rows = 3;
-  feedbackRow.appendChild(feedbackArea);
-  card.appendChild(feedbackRow);
-
+  // Two-button row: Open | Confirm
   const actions = document.createElement('div');
   actions.className = 'specs-review-actions';
 
-  const approveBtn = document.createElement('button');
-  approveBtn.className = 'btn btn-success';
-  approveBtn.textContent = '✓ Approve – start coding';
+  const openBtn = document.createElement('button');
+  openBtn.className = 'btn btn-secondary';
+  openBtn.innerHTML =
+    '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0">' +
+      '<path d="M9 1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V5z"/>' +
+      '<polyline points="9 1 9 5 13 5"/>' +
+    '</svg>' +
+    'Open file';
+  openBtn.addEventListener('click', function() {
+    // Pass the already-known path if available, else let view.ts derive it
+    vscode.postMessage({ command: 'openSpecsFile', filePath: _specsFilePath, fileContent: specs });
+  });
 
-  const reviseBtn = document.createElement('button');
-  reviseBtn.className = 'btn btn-secondary';
-  reviseBtn.textContent = '✎ Request revision';
+  const confirmBtn = document.createElement('button');
+  confirmBtn.className = 'btn btn-success';
+  confirmBtn.innerHTML =
+    '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0">' +
+      '<polyline points="2 8 6 12 14 4"/>' +
+    '</svg>' +
+    'Confirm';
 
-  const sendReviseBtn = document.createElement('button');
-  sendReviseBtn.className = 'btn btn-primary';
-  sendReviseBtn.textContent = 'Send revision';
-  sendReviseBtn.style.display = 'none';
-
-  actions.appendChild(approveBtn);
-  actions.appendChild(reviseBtn);
-  actions.appendChild(sendReviseBtn);
+  actions.appendChild(openBtn);
+  actions.appendChild(confirmBtn);
   card.appendChild(actions);
 
   function settle(action, feedback) {
-    approveBtn.disabled = true;
-    reviseBtn.disabled = true;
-    sendReviseBtn.disabled = true;
-    feedbackArea.disabled = true;
+    openBtn.disabled = true;
+    confirmBtn.disabled = true;
     const summary = document.createElement('div');
     summary.className = 'clarify-summary';
     summary.innerHTML =
       '<div class="cs-q">Specifications review</div>' +
-      '<div class="cs-a">' + escHtml(action === 'approve' ? 'Approved — proceeding to code generation.' : 'Revision requested: ' + feedback) + '</div>';
+      '<div class="cs-a">' + escHtml(action === 'approve'
+        ? 'Confirmed — proceeding to code generation.'
+        : 'Revision requested.') + '</div>';
     card.replaceWith(summary);
-    // Route to the dedicated /approve-specs endpoint (action + feedback)
     vscode.postMessage({
       command: 'submitSpecsReview',
       runId: currentRunId,
@@ -1153,26 +1173,16 @@ function showSpecsReviewCard(question, specs) {
     scrollFeed();
   }
 
-  approveBtn.addEventListener('click', () => settle('approve', ''));
-
-  reviseBtn.addEventListener('click', () => {
-    feedbackRow.style.display = '';
-    reviseBtn.style.display = 'none';
-    sendReviseBtn.style.display = '';
-    feedbackArea.focus();
-  });
-
-  sendReviseBtn.addEventListener('click', () => {
-    const fb = feedbackArea.value.trim();
-    if (!fb) { feedbackArea.focus(); return; }
-    settle('revise', fb);
-  });
-
-  feedbackArea.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      const fb = feedbackArea.value.trim();
-      if (fb) settle('revise', fb);
+  confirmBtn.addEventListener('click', function() {
+    // If user opened and possibly edited the file, read it back and check for changes
+    if (_specsFilePath) {
+      confirmBtn.disabled = true;
+      confirmBtn.textContent = 'Reading…';
+      vscode.postMessage({ command: 'readSpecsFile', filePath: _specsFilePath });
+      _pendingReviseFromFile = { originalSpecs: specs, settle };
+    } else {
+      // File was never opened — straight approve
+      settle('approve', '');
     }
   });
 
@@ -1182,6 +1192,7 @@ function showSpecsReviewCard(question, specs) {
 
 // Iteration review card — senior mode: proceed or inject instructions
 function showIterationReviewCard(question) {
+  breakAgentGroup();
   const card = document.createElement('div');
   card.className = 'iter-review-card fade-in';
 
@@ -1652,6 +1663,27 @@ window.addEventListener('message', async (event) => {
 
   if (msg.command === 'submitResult') {
     showSubmitResult(!!msg.passed, msg.score ?? 0, msg.feedback ?? '');
+    return;
+  }
+
+  if (msg.command === 'specsFilePath') {
+    // view.ts confirmed the specs MD file was written — store path so revise btn can read it
+    _specsFilePath = msg.filePath;
+    return;
+  }
+
+  if (msg.command === 'specsFileContent') {
+    // view.ts read back the edited specs MD — resolve the pending revise
+    if (_pendingReviseFromFile) {
+      const { originalSpecs, settle } = _pendingReviseFromFile;
+      _pendingReviseFromFile = null;
+      const content = msg.content || '';
+      // Use the edited content as feedback; if unchanged, note that
+      const feedback = content.trim() === (originalSpecs || '').trim()
+        ? 'Revision requested — no textual changes detected in the specs file.'
+        : content;
+      settle('revise', feedback);
+    }
     return;
   }
 });
