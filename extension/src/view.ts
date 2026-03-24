@@ -104,6 +104,7 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
         userRequest?: string;
         mode?: string;
         files?: string[];
+        paths?: string[];   // optional subset for acceptAll/discardAll
         projectDir?: string;
         filePath?: string;
         fileContent?: string;
@@ -177,12 +178,12 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
       }
 
       if (msg.command === "acceptAll") {
-        await this.acceptAllProposed();
+        await this.acceptAllProposed(msg.paths);
         return;
       }
 
       if (msg.command === "discardAll") {
-        await this.discardAllProposed();
+        await this.discardAllProposed(msg.paths);
         return;
       }
 
@@ -392,30 +393,36 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async acceptAllProposed(): Promise<void> {
+  private async acceptAllProposed(paths?: string[]): Promise<void> {
     // Files are already written to workspace on generation — just close diff tabs
-    const count = this.proposedFiles.size;
-    this.proposedFiles.clear();
-    await this.closeJameProposedTabs();
+    const toAccept = paths
+      ? paths
+      : [...this.proposedFiles.keys()].filter(k => !k.startsWith("__"));
+    for (const filePath of toAccept) {
+      this.proposedFiles.delete(filePath);
+      await this.closeJameProposedTabs(filePath);
+    }
     if (this.view) {
       this.view.webview.postMessage({ command: "allAccepted" });
     }
-    vscode.window.showInformationMessage(`Kept ${count} generated file(s).`);
+    vscode.window.showInformationMessage(`Kept ${toAccept.length} generated file(s).`);
   }
 
-  private async discardAllProposed(): Promise<void> {
-    // Delete all written files from workspace then close diff tabs
+  private async discardAllProposed(paths?: string[]): Promise<void> {
+    // Delete specified (or all) written files from workspace then close diff tabs
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    const toDiscard = paths
+      ? paths
+      : [...this.proposedFiles.keys()].filter(k => !k.startsWith("__"));
     let deleted = 0;
     if (workspaceRoot) {
-      for (const filePath of this.proposedFiles.keys()) {
-        if (filePath.startsWith("__")) continue; // skip __prev__ / __empty__ keys
+      for (const filePath of toDiscard) {
         const dest = path.join(workspaceRoot, filePath);
         if (fs.existsSync(dest)) { fs.unlinkSync(dest); deleted++; }
+        this.proposedFiles.delete(filePath);
+        await this.closeJameProposedTabs(filePath);
       }
     }
-    this.proposedFiles.clear();
-    await this.closeJameProposedTabs();
     if (this.view) {
       this.view.webview.postMessage({ command: "allDiscarded" });
     }
@@ -1059,7 +1066,7 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
     textarea {
       flex: 1;
       min-height: 20px;
-      max-height: 120px;
+      max-height: 160px;
       font-size: 12px;
       background: transparent;
       color: #d4d4d4;
@@ -1068,7 +1075,13 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
       resize: none;
       font-family: inherit;
       line-height: 1.5;
+      overflow-y: auto;
     }
+
+    textarea::-webkit-scrollbar { width: 4px; }
+    textarea::-webkit-scrollbar-track { background: transparent; }
+    textarea::-webkit-scrollbar-thumb { background: #464647; border-radius: 2px; }
+    textarea::-webkit-scrollbar-thumb:hover { background: #5a5a5a; }
 
     textarea::placeholder { color: #6a6a6a; }
     textarea:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -1168,11 +1181,11 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
         <button class="stop-btn" id="stopBtn" style="display:none" title="Stop generation">
           <svg viewBox="0 0 10 10"><rect x="1" y="1" width="8" height="8"/></svg>
         </button>
-        <button class="send-btn" id="sendBtn" title="Build (Ctrl+Enter)">
+        <button class="send-btn" id="sendBtn" title="Build (Enter)">
           <svg viewBox="0 0 16 16"><path d="M1 1l14 7L1 15V9l10-2L1 7V1z"/></svg>
         </button>
       </div>
-      <div class="hint">Ctrl+Enter to send</div>
+      <div class="hint">Enter to send · Shift+Enter for new line</div>
     </div>
   </div>
 
@@ -1198,25 +1211,82 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
     let currentIteration = 0;
     let lastAgent        = null;
     // files panel state
-    let fpFiles          = {};   // path → { lines, absPath }
+    let fpFiles          = {};   // path → lines
+    let fpDecided        = new Set(); // paths already individually accepted/discarded
 
-    // Keep All = accept all diffs; Undo All = discard all diffs
+    // ── State persistence (survives panel moves) ──────────────────
+    function saveState() {
+      vscode.setState({
+        feedHtml:    feed.innerHTML,
+        fpFiles:     fpFiles,
+        fpDecided:   [...fpDecided],
+        fpVisible:   filesPanel.classList.contains('visible'),
+        fpBodyHtml:  filesPanelBody.innerHTML,
+        fpSummary:   filesPanelSummary.textContent,
+        currentRunId: currentRunId,
+        isRunning:   isRunning,
+      });
+    }
+
+    // Restore persisted state on load
+    (function restoreState() {
+      const s = vscode.getState();
+      if (!s) return;
+      if (s.feedHtml)   { feed.innerHTML = s.feedHtml; removeEmpty(); }
+      if (s.fpFiles)    { fpFiles = s.fpFiles; }
+      if (s.fpDecided)  { fpDecided = new Set(s.fpDecided); }
+      if (s.fpBodyHtml) { filesPanelBody.innerHTML = s.fpBodyHtml; }
+      if (s.fpSummary)  { filesPanelSummary.textContent = s.fpSummary; }
+      if (s.fpVisible)  { filesPanel.classList.add('visible'); }
+      if (s.currentRunId) { currentRunId = s.currentRunId; }
+      // Restore running state display (but don't re-enable input — run may be over)
+      if (s.isRunning)  { setRunning(true); }
+    })();
+
+    // Keep All = accept all undecided diffs; Undo All = discard all undecided diffs
     fpKeepBtn.addEventListener('click', () => {
-      vscode.postMessage({ command: 'acceptAll' });
-      fpKeepBtn.textContent = 'Kept ✓';
-      fpKeepBtn.disabled = true;
-      fpUndoBtn.disabled = true;
+      const undecided = Object.keys(fpFiles).filter(p => !fpDecided.has(p));
+      vscode.postMessage({ command: 'acceptAll', paths: undecided });
+      // Remove all undecided rows from the panel
+      undecided.forEach(p => {
+        const row = filesPanelBody.querySelector('[data-path="' + CSS.escape(p) + '"]');
+        if (row) row.remove();
+        delete fpFiles[p];
+        fpDecided.add(p);
+      });
+      updateFilesPanelSummary();
+      if (Object.keys(fpFiles).length === 0) filesPanel.classList.remove('visible');
     });
     fpUndoBtn.addEventListener('click', () => {
-      vscode.postMessage({ command: 'discardAll' });
-      fpUndoBtn.textContent = 'Undone';
-      fpUndoBtn.disabled = true;
-      fpKeepBtn.disabled = true;
+      const undecided = Object.keys(fpFiles).filter(p => !fpDecided.has(p));
+      vscode.postMessage({ command: 'discardAll', paths: undecided });
+      // Remove all undecided rows from the panel
+      undecided.forEach(p => {
+        const row = filesPanelBody.querySelector('[data-path="' + CSS.escape(p) + '"]');
+        if (row) row.remove();
+        delete fpFiles[p];
+        fpDecided.add(p);
+      });
+      updateFilesPanelSummary();
+      if (Object.keys(fpFiles).length === 0) filesPanel.classList.remove('visible');
     });
 
     // ── Files panel helpers ───────────────────────────────────────
+    function updateFilesPanelSummary() {
+      const count = Object.keys(fpFiles).length;
+      if (count === 0) {
+        filesPanelSummary.textContent = '';
+        saveState();
+        return;
+      }
+      const totalLines = Object.values(fpFiles).reduce(function(a, b) { return a + b; }, 0);
+      filesPanelSummary.textContent = count + ' file' + (count !== 1 ? 's' : '') + '  +' + totalLines;
+      saveState();
+    }
+
     function resetFilesPanel() {
       fpFiles = {};
+      fpDecided = new Set();
       filesPanelBody.innerHTML = '';
       filesPanelSummary.textContent = '';
       fpKeepBtn.textContent = 'Keep All';
@@ -1254,28 +1324,30 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
         e.stopPropagation();
         vscode.postMessage({ command: 'openProposedChange', filePath: relPath, fileContent: content });
       });
-      // ✓ = accept this file's diff
+      // ✓ = accept this file's diff → remove from list
       row.querySelector('.fp-keep').addEventListener('click', (e) => {
         e.stopPropagation();
         vscode.postMessage({ command: 'acceptFile', filePath: relPath });
-        row.classList.add('fp-resolved', 'fp-kept');
-        row.querySelector('.fp-keep').textContent = '✓';
-        row.querySelector('.fp-undo').style.display = 'none';
+        fpDecided.add(relPath);
+        delete fpFiles[relPath];
+        row.remove();
+        updateFilesPanelSummary();
+        if (Object.keys(fpFiles).length === 0) filesPanel.classList.remove('visible');
       });
-      // ✗ = discard this file's diff
+      // ✗ = discard this file's diff → remove from list
       row.querySelector('.fp-undo').addEventListener('click', (e) => {
         e.stopPropagation();
         vscode.postMessage({ command: 'discardFile', filePath: relPath });
-        row.classList.add('fp-resolved', 'fp-discarded');
-        row.querySelector('.fp-undo').textContent = '✗';
-        row.querySelector('.fp-keep').style.display = 'none';
+        fpDecided.add(relPath);
+        delete fpFiles[relPath];
+        row.remove();
+        updateFilesPanelSummary();
+        if (Object.keys(fpFiles).length === 0) filesPanel.classList.remove('visible');
       });
 
       filesPanelBody.appendChild(row);
 
-      const count = Object.keys(fpFiles).length;
-      const totalLines = Object.values(fpFiles).reduce(function(a, b) { return a + b; }, 0);
-      filesPanelSummary.textContent = count + ' file' + (count !== 1 ? 's' : '') + '  +' + totalLines;
+      updateFilesPanelSummary();
       filesPanel.classList.add('visible');
     }
 
@@ -1299,17 +1371,74 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
       progressBar.style.width = '0%';
     }
 
+    // ── Prompt history ────────────────────────────────────────────
+    let promptHistory    = [];   // array of sent prompt strings
+    let historyIndex     = -1;   // -1 = not browsing history
+    let historyDraft     = '';   // saved draft while browsing
+
     // ── Auto-resize textarea ─────────────────────────────────────
     inputEl.addEventListener('input', () => {
       inputEl.style.height = 'auto';
-      inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
+      inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + 'px';
+      // Reset history browsing if user edits manually
+      if (historyIndex !== -1) {
+        historyIndex = -1;
+        historyDraft = '';
+      }
     });
 
     // ── Keyboard ─────────────────────────────────────────────────
     inputEl.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && e.ctrlKey) {
+      // Enter → send (Shift+Enter inserts newline naturally via default)
+      if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         send();
+        return;
+      }
+
+      // Up arrow — navigate to older prompt (only when caret is on first line)
+      if (e.key === 'ArrowUp') {
+        const selStart = inputEl.selectionStart;
+        const beforeCaret = inputEl.value.substring(0, selStart);
+        const onFirstLine = !beforeCaret.includes('\\n');
+        if (onFirstLine && promptHistory.length > 0) {
+          e.preventDefault();
+          if (historyIndex === -1) {
+            historyDraft = inputEl.value;
+            historyIndex = promptHistory.length - 1;
+          } else if (historyIndex > 0) {
+            historyIndex--;
+          }
+          inputEl.value = promptHistory[historyIndex];
+          inputEl.style.height = 'auto';
+          inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + 'px';
+          inputEl.setSelectionRange(0, 0);
+        }
+        return;
+      }
+
+      // Down arrow — navigate to newer prompt or back to draft
+      if (e.key === 'ArrowDown') {
+        if (historyIndex === -1) return;
+        const selStart = inputEl.selectionStart;
+        const afterCaret = inputEl.value.substring(selStart);
+        const onLastLine = !afterCaret.includes('\\n');
+        if (onLastLine) {
+          e.preventDefault();
+          if (historyIndex < promptHistory.length - 1) {
+            historyIndex++;
+            inputEl.value = promptHistory[historyIndex];
+          } else {
+            historyIndex = -1;
+            inputEl.value = historyDraft;
+            historyDraft = '';
+          }
+          inputEl.style.height = 'auto';
+          inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + 'px';
+          const len = inputEl.value.length;
+          inputEl.setSelectionRange(len, len);
+        }
+        return;
       }
     });
 
@@ -1324,6 +1453,7 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
       stopBtn.style.display = running ? 'flex' : 'none';
       if (running) setProgressIndeterminate();
       else clearProgress();
+      saveState();
     }
 
     // ── Utilities ─────────────────────────────────────────────────
@@ -1349,7 +1479,7 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
     }
 
     function removeEmpty() { const e = document.getElementById('emptyState'); if (e) e.remove(); }
-    function scrollFeed()  { feed.scrollTop = feed.scrollHeight; }
+    function scrollFeed()  { feed.scrollTop = feed.scrollHeight; saveState(); }
 
     function countLines(text) { return text ? text.split('\\n').length : 0; }
 
@@ -1791,6 +1921,13 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
       if (!text || isRunning) return;
 
       const mode = modeSelect ? modeSelect.value : 'senior';
+
+      // Save to prompt history (avoid duplicating the last entry)
+      if (promptHistory.length === 0 || promptHistory[promptHistory.length - 1] !== text) {
+        promptHistory.push(text);
+      }
+      historyIndex = -1;
+      historyDraft = '';
 
       // Reset state
       generatedFiles = [];
