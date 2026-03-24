@@ -26,7 +26,7 @@ from graph.prompts.devops_prompts import (
 )
 from graph.state import AgentState, SingleFileContent
 from integrations.cortex import get_cortex_llm
-from utils.node import maybe_compress, run_parallel
+from utils.node import maybe_compress, run_parallel, strip_thinking
 
 
 # ── Known file sets (path → FILE_HINT key) ────────────────────────────────────
@@ -344,7 +344,8 @@ def _generate_file(
                     HumanMessage(content=user_msg),
                 ]
             )
-            content = _strip_fences(response.content)
+            _, raw = strip_thinking(response.content)
+            content = _strip_fences(raw)
         except Exception as exc2:
             print(f"[ACT]  raw completion failed for {file_path}: {exc2}")
             return ""
@@ -367,7 +368,8 @@ def _generate_file(
                     HumanMessage(content=retry_msg),
                 ]
             )
-            content = _strip_fences(response.content)
+            _, raw = strip_thinking(response.content)
+            content = _strip_fences(raw)
         except Exception as exc3:
             print(f"[ACT]  retry failed for {file_path}: {exc3}")
             return ""

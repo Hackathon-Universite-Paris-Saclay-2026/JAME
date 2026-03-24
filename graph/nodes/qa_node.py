@@ -601,10 +601,10 @@ def _run_project_qa(
       failures trigger a detailed per-file review + fix instructions →
       ``qa_passed=False`` sent to Developer.
     - ``False`` (small project): setup failures are non-blocking; compile
-      errors are logged but not blocking; test failures are assessed via
-      relevancy — if any ``FIX THE CODE`` verdict is found the fix loop is
-      triggered, otherwise the inappropriate tests are pruned inline and QA
-      passes with the cleaned ``code_files``.
+      errors are always blocking (SyntaxErrors must be fixed); test failures
+      are assessed via relevancy — if any ``FIX THE CODE`` verdict is found
+      the fix loop is triggered, otherwise the inappropriate tests are pruned
+      inline and QA passes with the cleaned ``code_files``.
     """
 
     def _log(entry: dict) -> None:
@@ -804,19 +804,14 @@ def _run_project_qa(
             venv_dir, project_dir, updated_files
         )
         if not py_compile_passed:
-            if needs_full_qa:
-                compile_errors.append(py_compile_error)
-            else:
-                print(
-                    f"[COMPILE] ⚠️  Python compile error (not blocking):\n{py_compile_error}"
-                )
+            compile_errors.append(py_compile_error)
         _log(
             {
                 "agent": "qa",
                 "phase": "act",
                 "content": "Python compile passed."
                 if py_compile_passed
-                else f"Python compile failed: {py_compile_error[:200]}",
+                else f"Python compile failed: {py_compile_error}",
             }
         )
 
@@ -825,19 +820,14 @@ def _run_project_qa(
             project_dir, updated_files
         )
         if not js_syntax_passed:
-            if needs_full_qa:
-                compile_errors.append(js_syntax_error)
-            else:
-                print(
-                    f"[COMPILE] ⚠️  JS syntax error (not blocking):\n{js_syntax_error}"
-                )
+            compile_errors.append(js_syntax_error)
         _log(
             {
                 "agent": "qa",
                 "phase": "act",
                 "content": "JS/TS syntax passed."
                 if js_syntax_passed
-                else f"JS/TS syntax failed: {js_syntax_error[:200]}",
+                else f"JS/TS syntax failed: {js_syntax_error}",
             }
         )
 
