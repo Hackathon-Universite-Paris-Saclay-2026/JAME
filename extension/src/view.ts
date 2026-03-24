@@ -1325,7 +1325,7 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
 
     .input-row {
       display: flex;
-      align-items: flex-end;
+      align-items: center;
       gap: 6px;
       background: #2d2d30;
       border: 1px solid #3e3e42;
@@ -1349,6 +1349,7 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
       font-family: inherit;
       line-height: 1.5;
       overflow-y: auto;
+      padding-top: 2px;
     }
 
     textarea::-webkit-scrollbar { width: 4px; }
