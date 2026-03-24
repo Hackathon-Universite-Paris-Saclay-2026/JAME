@@ -111,3 +111,65 @@ class TestCancelRun:
         """Cancelling an unknown run_id returns HTTP 404."""
         response = client.post("/runs/nonexistent-run-id/cancel")
         assert response.status_code == 404
+
+
+class TestJuniorMode:
+    """Tests for the junior_mode field on POST /runs."""
+
+    def test_junior_mode_defaults_to_false(self) -> None:
+        """Omitting junior_mode defaults to False and the run is still accepted."""
+        with patch(
+            "api.service.OrchestratorService._run_pipeline",
+            new_callable=AsyncMock,
+        ):
+            response = client.post(
+                "/runs",
+                json={"user_request": "A simple todo list API"},
+            )
+        assert response.status_code == 202
+        assert "run_id" in response.json()
+
+    def test_junior_mode_true_is_accepted(self) -> None:
+        """Passing junior_mode=true returns HTTP 202 and a valid run_id."""
+        with patch(
+            "api.service.OrchestratorService._run_pipeline",
+            new_callable=AsyncMock,
+        ):
+            response = client.post(
+                "/runs",
+                json={
+                    "user_request": "A simple todo list API",
+                    "junior_mode": True,
+                },
+            )
+        assert response.status_code == 202
+        body = response.json()
+        assert "run_id" in body
+        assert isinstance(body["run_id"], str)
+        assert len(body["run_id"]) == 36  # UUID4 format
+
+    def test_junior_mode_false_is_accepted(self) -> None:
+        """Passing junior_mode=false is explicitly accepted."""
+        with patch(
+            "api.service.OrchestratorService._run_pipeline",
+            new_callable=AsyncMock,
+        ):
+            response = client.post(
+                "/runs",
+                json={
+                    "user_request": "A simple todo list API",
+                    "junior_mode": False,
+                },
+            )
+        assert response.status_code == 202
+
+    def test_junior_mode_invalid_type_returns_422(self) -> None:
+        """Passing a non-boolean, non-coercible junior_mode returns HTTP 422."""
+        response = client.post(
+            "/runs",
+            json={
+                "user_request": "A simple todo list API",
+                "junior_mode": {"nested": "object"},
+            },
+        )
+        assert response.status_code == 422

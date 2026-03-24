@@ -32,6 +32,14 @@ class RunCreateRequest(BaseModel):
         le=10,
         description="Maximum QA→Developer retry loops before forcing completion.",
     )
+    junior_mode: bool = Field(
+        default=False,
+        description=(
+            "When True, generated code includes extensive inline comments, "
+            "simple readable patterns, and step-by-step explanations — "
+            "suitable for junior developers learning the codebase."
+        ),
+    )
 
 
 class RunCreateResponse(BaseModel):

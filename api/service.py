@@ -110,6 +110,7 @@ class OrchestratorService:
             "qa_issues": [],
             "iteration": 0,
             "max_iterations": request.max_iterations,
+            "junior_mode": request.junior_mode,
             "reasoning_logs": [],
         }
 

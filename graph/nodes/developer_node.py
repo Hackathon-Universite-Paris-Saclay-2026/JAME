@@ -258,6 +258,41 @@ def _resolve_dependencies(file_path: str, generated: dict[str, dict]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Junior mode
+# ---------------------------------------------------------------------------
+
+_JUNIOR_MODE_SUFFIX = """
+<junior_mode>
+This project is being generated in JUNIOR MODE. Write code that is accessible
+and educational for junior developers:
+- Add a module-level docstring that explains the purpose and responsibilities of this file.
+- Add Google-style docstrings to every function and class, including Args, Returns, Raises, and a short Example where useful.
+- Add inline comments above non-obvious lines explaining the *why*, not just the *what*.
+- Prefer explicit, step-by-step logic over one-liners, clever comprehensions, or chained calls.
+- Avoid advanced language features (metaclasses, decorators beyond @property / @classmethod, complex generator expressions) unless they are standard framework conventions.
+- Name variables and functions clearly and verbosely; avoid abbreviations.
+- Keep functions short (≤ 25 lines of logic) and single-purpose; extract helpers if needed.
+- Include at least one usage example in the module docstring or in a `if __name__ == "__main__"` block for standalone utility files.
+</junior_mode>
+"""
+
+
+def _apply_junior_mode(prompt: str, junior_mode: bool) -> str:
+    """Append junior-mode instructions to *prompt* when the flag is set.
+
+    Args:
+        prompt: The original LLM system prompt.
+        junior_mode: When ``True``, junior-mode instructions are appended.
+
+    Returns:
+        The original prompt, or the prompt with junior-mode instructions appended.
+    """
+    if not junior_mode:
+        return prompt
+    return prompt.rstrip() + "\n" + _JUNIOR_MODE_SUFFIX
+
+
+# ---------------------------------------------------------------------------
 # LLM invocation (unified structured → raw fallback)
 # ---------------------------------------------------------------------------
 
@@ -336,6 +371,8 @@ def _generate_file(
     functional_design: str,
     generated: dict[str, dict],
     file_issues: str = "",
+    *,
+    junior_mode: bool = False,
 ) -> dict | None:
     """Generate a single file. Returns its dict or ``None`` on failure."""
     user_msg = _build_file_prompt(
@@ -343,7 +380,7 @@ def _generate_file(
     )
     content = _invoke_llm(
         llm,
-        GENERATE_SYSTEM_PROMPT,
+        _apply_junior_mode(GENERATE_SYSTEM_PROMPT, junior_mode),
         user_msg,
         schema=SingleFileContent,
         phase="ACT",
@@ -514,6 +551,8 @@ def _run_code_generation(
     qa_issues: list[dict],
     qa_feedback: str,
     iteration: int,
+    *,
+    junior_mode: bool = False,
 ) -> tuple[list[dict], dict[str, dict]]:
     """Generate all planned files. Returns ``(code_files, generated_map)``."""
     code_files: list[dict] = []
@@ -533,7 +572,13 @@ def _run_code_generation(
             file_path, qa_issues, qa_feedback, iteration
         )
         result = _generate_file(
-            llm, file_path, specs, functional_design, generated, file_issues
+            llm,
+            file_path,
+            specs,
+            functional_design,
+            generated,
+            file_issues,
+            junior_mode=junior_mode,
         )
         if result:
             code_files.append(result)
@@ -625,6 +670,8 @@ def _run_auto_fix(
     validation_issues: list[dict],
     specs: str,
     functional_design: str,
+    *,
+    junior_mode: bool = False,
 ) -> None:
     """Auto-fix files with critical/major validation issues. Mutates *code_files* in place."""
     critical_files = {
@@ -660,6 +707,7 @@ def _run_auto_fix(
             functional_design,
             generated,
             file_issues=f"\n## Consistency issues to fix in THIS file:\n{fix_text}",
+            junior_mode=junior_mode,
         )
         if result:
             code_files[file_idx] = result
@@ -688,7 +736,13 @@ def _resolve_all_generated(generated: dict[str, dict]) -> str:
     )
 
 
-def _run_lightweight(llm: BaseChatModel, scope: str, specs: str) -> list[dict]:
+def _run_lightweight(
+    llm: BaseChatModel,
+    scope: str,
+    specs: str,
+    *,
+    junior_mode: bool = False,
+) -> list[dict]:
     """Generate code for a function- or feature-level request.
 
     Skips the full-stack pipeline entirely — produces only the minimal files
@@ -718,7 +772,9 @@ def _run_lightweight(llm: BaseChatModel, scope: str, specs: str) -> list[dict]:
         file_plan = ["solution.py", "test_solution.py"]
     print(f"[PLAN] Files: {file_plan}")
 
-    gen_prompt = LIGHTWEIGHT_GENERATE_SYSTEM_PROMPT.format(scope=scope)
+    gen_prompt = _apply_junior_mode(
+        LIGHTWEIGHT_GENERATE_SYSTEM_PROMPT.format(scope=scope), junior_mode
+    )
     code_files: list[dict] = []
     generated: dict[str, dict] = {}
 
@@ -785,13 +841,21 @@ def developer_node(state: AgentState) -> dict:
     qa_feedback = state.get("qa_feedback", "")
     qa_issues = state.get("qa_issues", [])
     iteration = state.get("iteration", 0)
+    junior_mode: bool = state.get("junior_mode", False)
+
+    if junior_mode:
+        print(
+            "[INFO] Junior mode enabled — code will include enhanced comments and simplified patterns."
+        )
 
     # ── Lightweight path: function / feature scope ───────────────
     if scope in LIGHTWEIGHT_SCOPES and iteration == 0:
         print(
             f"\n\u26a1 Lightweight mode ({scope}) \u2014 skipping full-stack pipeline"
         )
-        code_files = _run_lightweight(llm, scope, specs)
+        code_files = _run_lightweight(
+            llm, scope, specs, junior_mode=junior_mode
+        )
         file_list = (
             ", ".join(f["path"] for f in code_files) if code_files else "(none)"
         )
@@ -848,6 +912,7 @@ def developer_node(state: AgentState) -> dict:
         qa_issues,
         qa_feedback,
         iteration,
+        junior_mode=junior_mode,
     )
 
     # ── Phase 4: Self-Validation ─────────────────────────────────
@@ -860,6 +925,7 @@ def developer_node(state: AgentState) -> dict:
             validation_issues,
             specs,
             functional_design,
+            junior_mode=junior_mode,
         )
 
     # ── Reasoning trace ──────────────────────────────────────────

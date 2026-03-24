@@ -188,6 +188,9 @@ class AgentState(TypedDict):
     # ── Orchestrator bookkeeping ────────────────────────────────
     iteration: int  # QA retry counter
     max_iterations: int  # safety cap
+    junior_mode: (
+        bool  # When True, generate heavily-commented, beginner-friendly code
+    )
     reasoning_logs: Annotated[
         list[ReasoningEntry], operator.add
     ]  # append-only trace
