@@ -915,6 +915,33 @@ def developer_node(state: AgentState) -> dict:
             ],
         }
 
+    # ── Mode-aware preamble + senior prompt queue injection ──────
+    mode = state.get("mode", "senior")
+    mode_preambles: dict[str, str] = {
+        "junior": "Generate a simple, minimal implementation. Focus on clarity over completeness.",
+        "senior": "Generate a well-structured, production-quality implementation with clear separation of concerns.",
+        "expert": "Generate an enterprise-grade implementation with full observability, scalability, and security considerations.",
+    }
+    mode_note = mode_preambles.get(mode, mode_preambles["senior"])
+
+    # Consume queued senior instructions — prepend to specs context for this iteration.
+    senior_queue: list[str] = list(state.get("senior_prompt_queue", []))
+    senior_instructions = ""
+    if senior_queue and mode == "senior":
+        senior_instructions = "\n\n## Senior developer instructions (queued by user):\n" + "\n".join(
+            f"- {p}" for p in senior_queue
+        )
+        _log(
+            {
+                "agent": "developer",
+                "phase": "plan",
+                "content": f"Applying {len(senior_queue)} queued senior instruction(s).",
+            }
+        )
+
+    # Prepend mode note and queued instructions to specs for this iteration.
+    augmented_specs = f"## Mode instruction\n{mode_note}\n\n{specs}{senior_instructions}"
+
     # ── Phase 1: Functional Design ───────────────────────────────
     raise_if_cancelled()
     functional_design = state.get("functional_design", "")
@@ -926,7 +953,7 @@ def developer_node(state: AgentState) -> dict:
                 "content": "Extracting functional design…",
             }
         )
-        functional_design = _run_functional_design(llm, specs)
+        functional_design = _run_functional_design(llm, augmented_specs)
         design_trace = (
             f"Extracted functional design ({len(functional_design)} chars): "
             "domain entities, business rules, API endpoints, NFR considerations."
@@ -947,7 +974,7 @@ def developer_node(state: AgentState) -> dict:
     )
     file_plan, plan_trace = _run_file_planning(
         llm,
-        specs,
+        augmented_specs,
         functional_design,
         qa_issues,
         qa_feedback,
@@ -973,7 +1000,7 @@ def developer_node(state: AgentState) -> dict:
     code_files, generated = _run_code_generation(
         llm,
         file_plan,
-        specs,
+        augmented_specs,
         functional_design,
         existing_files,
         qa_issues,
@@ -1022,9 +1049,13 @@ def developer_node(state: AgentState) -> dict:
     print(f"\n[REASON] {reason_trace}\n")
     _log({"agent": "developer", "phase": "reason", "content": reason_trace})
 
+    # Clear consumed senior instructions from queue
+    updated_queue: list[str] = []  # queue was fully consumed this iteration
+
     return {
         "functional_design": functional_design,
         "code_files": code_files,
+        "senior_prompt_queue": updated_queue,
         "reasoning_logs": [
             {"agent": "developer", "phase": "design", "content": design_trace},
             {"agent": "developer", "phase": "plan", "content": plan_trace},
