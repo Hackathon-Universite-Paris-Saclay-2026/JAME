@@ -15,6 +15,7 @@ server never blocks waiting for stdin.
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 import sys
 
 from langchain_core.language_models import BaseChatModel
@@ -452,6 +453,19 @@ def architect_node(state: AgentState) -> dict:
     reasoning_logs.append(
         {"agent": "architect", "phase": "reason", "content": reason_trace}
     )
+
+    run_output_dir = state.get("run_output_dir", "")
+    if run_output_dir:
+        output_dir = (Path(run_output_dir) / "output").resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if specs:
+            (output_dir / "specifications.md").write_text(
+                specs, encoding="utf-8"
+            )
+        if diagrams:
+            (output_dir / "c4_diagrams.md").write_text(
+                diagrams, encoding="utf-8"
+            )
 
     return {
         "scope": scope,
