@@ -671,7 +671,6 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
       font-weight: 600;
       color: #909090;
     }
-
     .empty p {
       font-size: 12px;
       line-height: 1.6;
@@ -969,8 +968,22 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
     }
     .sys-msg-icon { flex-shrink: 0; font-style: normal; }
     .sys-msg-text { flex: 1; word-break: break-word; }
-    .sys-msg.ok   { color: #4a9d4a; }
-    .sys-msg.warn { color: #d7ba7d; }
+    .sys-msg.ok {
+      color: #4a9d4a;
+      background: rgba(74,157,74,0.06);
+      border-left: 2px solid #4a9d4a;
+      border-radius: 0 4px 4px 0;
+      padding: 6px 12px 6px 10px;
+      margin: 2px 8px;
+    }
+    .sys-msg.warn {
+      color: #d7ba7d;
+      background: rgba(215,186,125,0.06);
+      border-left: 2px solid #d7ba7d;
+      border-radius: 0 4px 4px 0;
+      padding: 6px 12px 6px 10px;
+      margin: 2px 8px;
+    }
     .sys-msg.err  {
       color: #f48771;
       background: rgba(244,135,113,0.07);
@@ -1163,10 +1176,34 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
     }
     .slash-pill-x:hover { color: #7ec0f0; }
 
+    /* ── JAME header (always visible above input) ────────────────── */
+    .jame-header {
+      display: flex;
+      justify-content: center;
+      padding: 8px 12px 6px;
+      border-top: 1px solid #3e3e42;
+      flex-shrink: 0;
+    }
+    .jame-title { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+    .jame-letters { display: flex; gap: 2px; font-size: 18px; font-weight: 700; letter-spacing: 2px; }
+    .jame-letters .j { color: #569cd6; }
+    .jame-letters .a { color: #9cdcfe; }
+    .jame-letters .m { color: #4ec9b0; }
+    .jame-letters .e { color: #ce9178; }
+    .jame-acronym {
+      display: flex; gap: 6px;
+      font-size: 9.5px; font-weight: 500;
+      letter-spacing: 0.16em; text-transform: uppercase;
+      opacity: 0.65;
+    }
+    .jame-acronym .w-j { color: #569cd6; }
+    .jame-acronym .w-a { color: #9cdcfe; }
+    .jame-acronym .w-m { color: #4ec9b0; }
+    .jame-acronym .w-e { color: #ce9178; }
+
     /* ── Input area ──────────────────────────────────────────────── */
     .input-area {
-      border-top: 1px solid #3e3e42;
-      padding: 10px 12px;
+      padding: 6px 12px 10px;
       flex-shrink: 0;
       position: relative;
     }
@@ -1362,8 +1399,14 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
           <path stroke-linecap="round" stroke-linejoin="round"
             d="M9.75 3.104v5.714a2.25 2.25 0 0 1-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 0 1 4.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3M14.25 3.104c.251.023.501.05.75.082M19.8 15.3l-1.57.393A9.065 9.065 0 0 1 12 15a9.065 9.065 0 0 0-6.23-.693L5 14.5m14.8.8 1.402 1.402c1.232 1.232.65 3.318-1.067 3.611A48.309 48.309 0 0 1 12 21a48.25 48.25 0 0 1-8.135-.687c-1.718-.293-2.3-2.379-1.067-3.61L5 14.5" />
         </svg>
-        <h2>JAME Orchestrator</h2>
         <p>Describe what you want to build. The multi-agent pipeline will architect, code, and validate it.</p>
+      </div>
+    </div>
+
+    <div class="jame-header">
+      <div id="jameTitle" class="jame-title">
+        <span class="jame-letters"><span class="j">J</span><span class="a">A</span><span class="m">M</span><span class="e">E</span></span>
+        <span class="jame-acronym"><span class="w-j">Just</span><span class="w-a">A</span><span class="w-m">Model-Driven</span><span class="w-e">Engineer</span></span>
       </div>
     </div>
 
@@ -1510,6 +1553,7 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
       { name: '/explain',desc: 'Explain the last generated code or output' },
       { name: '/retry',  desc: 'Retry the last failed build' },
       { name: '/clear',  desc: 'Clear conversation and start fresh' },
+      { name: '/fun',    desc: 'Toggle the spirit of JAME' },
     ];
 
     // Active slash command state
@@ -1604,8 +1648,40 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
       if (modeItem) { selectMode(modeItem.dataset.mode); }
     }
 
+    let _funMode = false;
+    // Each entry: [w-j word, w-a word, w-m word, w-e word]
+    const _jameWords = {
+      normal: ['Just', 'A', 'Model-Driven', 'Engineer'],
+      fun:    ['Just', 'Another', 'Mad', 'Engineer'],
+    };
+    function setJameTitle(fun) {
+      const title = document.getElementById('jameTitle');
+      if (!title) return;
+      const words = fun ? _jameWords.fun : _jameWords.normal;
+      title.innerHTML =
+        '<span class="jame-letters"><span class="j">J</span><span class="a">A</span><span class="m">M</span><span class="e">E</span></span>' +
+        '<span class="jame-acronym">' +
+          '<span class="w-j">' + words[0] + '</span>' +
+          '<span class="w-a">' + words[1] + '</span>' +
+          '<span class="w-m">' + words[2] + '</span>' +
+          '<span class="w-e">' + words[3] + '</span>' +
+        '</span>';
+    }
+
     function selectSlashCommand(name) {
       if (name === '/clear') { closeSuggestions(); inputEl.value = ''; doNewChat(); return; }
+      if (name === '/fun') {
+        _funMode = !_funMode;
+        setJameTitle(_funMode);
+        const raw = inputEl.value;
+        const slashMatch = raw.match(new RegExp('^([ \\t]*)[/][^ \\t]*'));
+        inputEl.value = slashMatch ? raw.slice(slashMatch[0].length).trimStart() : raw;
+        closeSuggestions();
+        addSysMsg(_funMode ? 'Just Another Mad Engineer — engaged. 😈' : 'Back to Just A Model-Driven Engineer.', 'info');
+        saveState();
+        inputEl.focus();
+        return;
+      }
       if (name === '/mode') {
         // Clear the /mode token and open mode sub-picker
         const raw = inputEl.value;
@@ -1673,6 +1749,7 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
         isRunning:   isRunning,
         currentMode: currentMode,
         modeLocked:  modeLocked,
+        funMode:     _funMode,
       });
     }
 
@@ -1689,6 +1766,7 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
       if (s.currentRunId) { currentRunId = s.currentRunId; }
       if (s.currentMode) { applyMode(s.currentMode); }
       if (s.modeLocked)  { lockMode(); }
+      if (s.funMode)     { _funMode = true; setJameTitle(true); }
       // Restore running state display (but don't re-enable input — run may be over)
       if (s.isRunning)  { setRunning(true); }
     })();
@@ -1979,12 +2057,17 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
     }
 
     // ── System / status messages ─────────────────────────────────
+    const _sysIcons = { ok: '✓', warn: '⚠', err: '✕', info: '›' };
     function addSysMsg(text, type = 'info') {
+      const icon = _sysIcons[type] || _sysIcons.info;
+      const safe = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
       const el = document.createElement('div');
       el.className = 'sys-msg ' + type + ' fade-in';
-      el.textContent = text;
+      el.innerHTML = '<i class="sys-msg-icon">' + icon + '</i><span class="sys-msg-text">' + safe + '</span>';
+      removeEmpty();
       feed.appendChild(el);
       scrollFeed();
+      saveState();
     }
 
     // ── Agent log rows ────────────────────────────────────────────
@@ -2471,6 +2554,7 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
       clearSlashCommand();
       closeSuggestions();
       unlockMode();
+      setJameTitle(_funMode);
       if (ws) { ws.close(); ws = null; }
 
       // Reset UI
@@ -2488,7 +2572,6 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
       emptyDiv.innerHTML =
         '<svg class="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">' +
         '<path stroke-linecap="round" stroke-linejoin="round" d="M9.75 3.104v5.714a2.25 2.25 0 0 1-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 0 1 4.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3M14.25 3.104c.251.023.501.05.75.082M19.8 15.3l-1.57.393A9.065 9.065 0 0 1 12 15a9.065 9.065 0 0 0-6.23-.693L5 14.5m14.8.8 1.402 1.402c1.232 1.232.65 3.318-1.067 3.611A48.309 48.309 0 0 1 12 21a48.25 48.25 0 0 1-8.135-.687c-1.718-.293-2.3-2.379-1.067-3.61L5 14.5" /></svg>' +
-        '<h2>JAME Orchestrator</h2>' +
         '<p>Describe what you want to build. The multi-agent pipeline will architect, code, and validate it.</p>';
       feed.appendChild(emptyDiv);
 
