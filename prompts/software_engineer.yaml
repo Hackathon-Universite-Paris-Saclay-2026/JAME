@@ -73,6 +73,12 @@ plan:
     1. database.py -> 2. models.py -> 3. services/ -> 4. routers/ -> 5. main.py -> 6. requirements.txt -> 7. package.json -> 8. App.js -> 9. components/ -> 10. conftest.py -> 11. test_*.py
     </generation_order>
 
+    <javascript_rules>
+    - Any project containing .js, .ts, .jsx, or .tsx files MUST include a root-level package.json.
+    - package.json MUST define a "scripts": {"test": "<runner>"} entry (use jest, vitest, or mocha based on the project).
+    - Pure JavaScript/TypeScript projects (no Python) must still include package.json even if not listed in mandatory_files above.
+    </javascript_rules>
+
     <output_format>
     Return ONLY a line-separated list of file paths. No explanations.
     </output_format>
