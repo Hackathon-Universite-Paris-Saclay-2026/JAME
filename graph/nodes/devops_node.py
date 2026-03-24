@@ -177,6 +177,34 @@ def _decide(llm: BaseChatModel, context: str) -> DevOpsDecision:
         )
 
 
+def _enforce_dependencies(plan: "DevOpsFilePlan") -> None:
+    """Enforce inter-file coherence rules on a DevOpsFilePlan in-place.
+
+    Rules:
+    - docker-compose.yml requires .env and .env.example
+      (compose almost always references env vars; without examples, the repo
+      is unusable for anyone cloning it)
+    - Dockerfile requires .dockerignore
+      (prevents secrets and build artifacts leaking into the image context)
+    - pyproject.toml requires requirements-dev.txt
+      (pyproject.toml alone does not pin transitive dev deps for CI)
+    """
+    cd = plan.cd_files
+    ci = plan.ci_files
+
+    if "docker-compose.yml" in cd:
+        if ".env" not in cd:
+            cd.append(".env")
+        if ".env.example" not in cd:
+            cd.append(".env.example")
+
+    if "Dockerfile" in cd and ".dockerignore" not in cd:
+        cd.append(".dockerignore")
+
+    if "pyproject.toml" in ci and "requirements-dev.txt" not in ci:
+        ci.append("requirements-dev.txt")
+
+
 def _plan_files(
     llm: BaseChatModel, context: str, needs_cd: bool
 ) -> DevOpsFilePlan:
@@ -455,11 +483,16 @@ def devops_node(state: AgentState) -> dict:
     # Ensure mandatory workflow files are always present
     if ".github/workflows/ci.yml" not in file_plan.ci_files:
         file_plan.ci_files.insert(0, ".github/workflows/ci.yml")
+    if "Makefile" not in file_plan.ci_files:
+        file_plan.ci_files.append("Makefile")
     if (
         decision.needs_cd
         and ".github/workflows/cd.yml" not in file_plan.cd_files
     ):
         file_plan.cd_files.insert(0, ".github/workflows/cd.yml")
+
+    # Enforce inter-file coherence (e.g. docker-compose → .env/.env.example)
+    _enforce_dependencies(file_plan)
 
     print(f"[PLAN] CI files  ({len(file_plan.ci_files)}): {file_plan.ci_files}")
     print(f"[PLAN] CD files  ({len(file_plan.cd_files)}): {file_plan.cd_files}")
