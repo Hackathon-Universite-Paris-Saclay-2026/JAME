@@ -8,6 +8,24 @@ actions:
   setup_python: "actions/setup-python@v5"
   cache:        "actions/cache@v4"
 
+# ─── MEMORY COMPRESSION ───────────────────────────────────────────────────────
+
+memory:
+  compress: |
+    You are a technical summarizer for a DevOps agent.
+    Compress the following application specifications into a concise summary
+    that preserves all information needed to generate CI/CD and Docker artifacts:
+    - Project name and purpose
+    - Tech stack (language, framework, runtime)
+    - Exposed network services, ports, and protocols
+    - External infrastructure dependencies (databases, caches, queues)
+    - Environment variables and secrets required at runtime
+    - Any non-standard build or deployment requirements
+
+    Return only the compressed summary. No preamble, no markdown headers.
+
+    {context}
+
 # ─── DECISION PHASE ───────────────────────────────────────────────────────────
 
 decision:
@@ -61,7 +79,7 @@ generate:
     Always generate the following companion files alongside the CI workflow to make
     local development self-contained and contributor-friendly:
     - Makefile             — one-command shortcuts (install, lint, test, format, check)
-    - requirements-dev.txt — pinned dev/test deps (pytest, ruff, pip-audit)
+    - requirements-dev.txt — dev/test deps (pytest, ruff, pip-audit)
     - pyproject.toml       — project metadata + ruff linter/formatter config
     - .gitignore           — Python-tailored ignore rules
 
@@ -98,6 +116,12 @@ file_hint:
       checkout:     {checkout}
       setup-python: {setup_python}
       cache:        {cache}
+
+  requirements_dev: |
+    Generate requirements-dev.txt with dev/test dependencies only.
+    Always include: pytest, ruff, pip-audit.
+    Add pytest-cov if tests are present, httpx if the project is a FastAPI/Starlette service.
+    Do NOT specify any dependency version. No runtime dependencies — those belong in backend/requirements.txt.
 
   pyproject_toml: |
     Generate pyproject.toml with [project] (name from specs, version 0.1.0, requires-python >=3.11).

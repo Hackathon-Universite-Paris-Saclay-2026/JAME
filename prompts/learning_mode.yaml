@@ -1,4 +1,4 @@
-stripper:
+exercise_generator:
   analyze: |
     You are a Senior Software Engineer and technical mentor.
     You are given a list of source files that form a complete working application.

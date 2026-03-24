@@ -9,6 +9,7 @@ _hint = _p["file_hint"]
 DECISION_PROMPT: str = _p["decision"]["classify"]
 CI_SYSTEM_PROMPT: str = _p["generate"]["ci_system"]
 CD_SYSTEM_PROMPT: str = _p["generate"]["cd_system"]
+MEMORY_COMPRESS_PROMPT: str = _p["memory"]["compress"]
 
 # Inject pinned GitHub Actions SHAs into the ci_workflow hint
 _sha = {
