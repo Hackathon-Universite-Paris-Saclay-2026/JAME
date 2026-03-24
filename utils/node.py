@@ -7,15 +7,10 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 import re
-import subprocess
-import sys
-import time
-import urllib.request
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage
 
-from graph.state import CodeFile
 from integrations.github import auto_commit, init_repo
 
 
