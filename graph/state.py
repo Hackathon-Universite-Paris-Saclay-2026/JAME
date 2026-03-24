@@ -174,7 +174,9 @@ class AnalysisIssue(BaseModel):
         default=None,
         description="Line number or range if identifiable, else null",
     )
-    description: str = Field(default="", description="What is wrong and why it matters")
+    description: str = Field(
+        default="", description="What is wrong and why it matters"
+    )
     fix: str = Field(default="", description="Concrete fix or recommendation")
 
 
@@ -224,7 +226,9 @@ class AgentState(TypedDict):
     qa_passed: bool
     qa_feedback: str  # plain-text feedback sent back to Developer on failure
     qa_issues: list[QAIssue]  # structured, actionable issue tickets
-    run_output_dir: str  # absolute path to runs/{run_id}/ — QA uses it for venv + project
+    run_output_dir: (
+        str  # absolute path to runs/{run_id}/ — QA uses it for venv + project
+    )
 
     # ── Orchestrator bookkeeping ────────────────────────────────
     iteration: int  # QA retry counter

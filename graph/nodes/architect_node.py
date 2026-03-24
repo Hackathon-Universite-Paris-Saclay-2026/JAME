@@ -115,6 +115,7 @@ def _interrogate(
     """
     clarifications: list[dict] = []
     for round_num in range(1, max_rounds + 1):
+        raise_if_cancelled()
         previous_qa = (
             "\n".join(
                 f"Q: {c['question']}\nA: {c['answer']}" for c in clarifications
@@ -173,6 +174,7 @@ def _interrogate_api(
     """
     clarifications: list[dict] = []
     for round_num in range(1, max_rounds + 1):
+        raise_if_cancelled()
         previous_qa = (
             "\n".join(
                 f"Q: {c['question']}\nA: {c['answer']}" for c in clarifications
@@ -356,6 +358,7 @@ def architect_node(state: AgentState) -> dict:
     feedback = ""
 
     for iteration in range(1, MAX_DESIGN_ITERATIONS + 1):
+        raise_if_cancelled()
         print(f"[ACT]  Design iteration {iteration}/{MAX_DESIGN_ITERATIONS} …")
 
         if scope in ("function", "feature"):

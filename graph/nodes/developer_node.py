@@ -566,6 +566,7 @@ def _run_code_generation(
         generated.update(existing_files)
 
     for i, file_path in enumerate(file_plan, 1):
+        raise_if_cancelled()
         file_path = _sanitize_path(file_path)
         print(
             f"\n[ACT]  Generating file {i}/{len(file_plan)}: {file_path} \u2026"
@@ -778,6 +779,7 @@ def _run_lightweight(
     generated: dict[str, dict] = {}
 
     for i, file_path in enumerate(file_plan, 1):
+        raise_if_cancelled()
         file_path = _sanitize_path(file_path)
         print(
             f"\n[ACT]  Generating file {i}/{len(file_plan)}: {file_path} \u2026"
@@ -882,6 +884,7 @@ def developer_node(state: AgentState) -> dict:
         }
 
     # ── Phase 1: Functional Design ───────────────────────────────
+    raise_if_cancelled()
     functional_design = state.get("functional_design", "")
     if iteration == 0:
         functional_design = _run_functional_design(llm, specs)
@@ -894,6 +897,7 @@ def developer_node(state: AgentState) -> dict:
         print(f"\n[DESIGN] {design_trace}")
 
     # ── Phase 2: File Planning ───────────────────────────────────
+    raise_if_cancelled()
     file_plan, plan_trace = _run_file_planning(
         llm,
         specs,

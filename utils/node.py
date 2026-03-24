@@ -7,15 +7,15 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 import re
-import subprocess
-import sys
-import time
-import urllib.request
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage
 
-from graph.state import CodeFile
+from cancel_token import (
+    get_current_token,
+    raise_if_cancelled,
+    set_current_token,
+)
 from integrations.github import auto_commit, init_repo
 
 
@@ -33,6 +33,9 @@ def run_parallel(
 ) -> list:
     """Execute zero-argument callables in parallel, returning results in submission order.
 
+    The cancel token from the calling thread is propagated into each worker so
+    that ``raise_if_cancelled()`` works correctly inside parallel tasks.
+
     Args:
         tasks: No-argument callables to run concurrently (use ``functools.partial``
                to bind arguments beforehand).
@@ -43,10 +46,21 @@ def run_parallel(
     """
     if not tasks:
         return []
+
+    # Capture the current thread's cancel token (may be None if unset)
+    parent_token = get_current_token()
+
+    def _wrap(task: Callable[[], object]) -> object:
+        # Propagate the token into the worker thread
+        if parent_token is not None:
+            set_current_token(parent_token)
+        raise_if_cancelled()
+        return task()
+
     with ThreadPoolExecutor(
         max_workers=min(max_workers, len(tasks))
     ) as executor:
-        futures = [executor.submit(task) for task in tasks]
+        futures = [executor.submit(_wrap, task) for task in tasks]
         return [f.result() for f in futures]
 
 

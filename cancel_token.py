@@ -15,6 +15,11 @@ def set_current_token(token: CancelToken) -> None:
     _local.token = token
 
 
+def get_current_token() -> CancelToken | None:
+    """Return the cancel token bound to the current thread, or None if unset."""
+    return getattr(_local, "token", None)
+
+
 def raise_if_cancelled() -> None:
     """Check the current thread's token and raise if cancelled. No-op if unset."""
     token: CancelToken | None = getattr(_local, "token", None)
