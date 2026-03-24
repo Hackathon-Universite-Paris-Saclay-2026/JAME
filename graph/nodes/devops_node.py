@@ -10,6 +10,7 @@ Uses the same chunked per-file approach as the developer node:
 from __future__ import annotations
 
 from functools import partial
+from pathlib import Path
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -220,6 +221,7 @@ def _collect_file_tasks(
     hint_map: dict[str, str],
     system_prompt: str,
     label: str,
+    project_dir: Path | None = None,
 ) -> tuple[list, list[tuple[str, str]]]:
     """Build parallel task list for a set of DevOps files.
 
@@ -238,7 +240,13 @@ def _collect_file_tasks(
         bound_llm = llm.bind(max_tokens=_get_max_tokens(path))
         tasks.append(
             partial(
-                _generate_file, bound_llm, system_prompt, context, path, hint
+                _generate_file,
+                bound_llm,
+                system_prompt,
+                context,
+                path,
+                hint,
+                project_dir,
             )
         )
         meta.append((label, path))
@@ -262,6 +270,7 @@ def _generate_file(
     context: str,
     file_path: str,
     hint: str,
+    project_dir: Path | None = None,
 ) -> str:
     """Generate the content of a single DevOps file using the LLM.
 
@@ -275,6 +284,7 @@ def _generate_file(
         context: Formatted specs + source file list string.
         file_path: Relative path of the file being generated.
         hint: File-specific instructions from FILE_HINT.
+        project_dir: If provided, write the file to disk immediately.
 
     Returns:
         The generated file content, or an empty string if all attempts fail.
@@ -313,7 +323,9 @@ def _generate_file(
 
     # Last-chance retry with an explicit prompt if still degenerate
     if _is_degenerate(content, file_path):
-        print(f"[ACT]  degenerate output for {file_path} — retrying with explicit prompt")
+        print(
+            f"[ACT]  degenerate output for {file_path} — retrying with explicit prompt"
+        )
         try:
             retry_msg = (
                 f"Generate the complete content of the file `{file_path}`.\n\n"
@@ -331,6 +343,11 @@ def _generate_file(
         except Exception as exc3:
             print(f"[ACT]  retry failed for {file_path}: {exc3}")
             return ""
+
+    if project_dir is not None and content.strip():
+        dest = project_dir / file_path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(content, encoding="utf-8")
 
     return content
 
@@ -430,6 +447,12 @@ def devops_node(state: AgentState) -> dict:
     # ── Act phase: generate all CI + CD files in parallel ─────────────────────
     # CI and CD files are fully independent — build a flat task list and run
     # everything at once (CI first, then CD for predictable log ordering).
+    run_output_dir = state.get("run_output_dir", "")
+    project_dir: Path | None = None
+    if run_output_dir:
+        project_dir = (Path(run_output_dir) / "output" / "project").resolve()
+        project_dir.mkdir(parents=True, exist_ok=True)
+
     ci_tasks, ci_meta = _collect_file_tasks(
         llm,
         generation_context,
@@ -437,6 +460,7 @@ def devops_node(state: AgentState) -> dict:
         _CI_FILE_HINTS,
         CI_SYSTEM_PROMPT,
         "CI",
+        project_dir,
     )
     cd_tasks, cd_meta = (
         _collect_file_tasks(
@@ -446,6 +470,7 @@ def devops_node(state: AgentState) -> dict:
             _CD_FILE_HINTS,
             CD_SYSTEM_PROMPT,
             "CD",
+            project_dir,
         )
         if decision.needs_cd
         else ([], [])

@@ -18,7 +18,7 @@ from cancel_token import CancelToken, RunCancelledError, set_current_token
 from graph.graph import build_graph
 from graph.nodes.validator_node import validate_submission as _validate
 from graph.state import AgentState
-from utils.node import save_artifacts
+from utils.node import finalize_artifacts
 
 from .job_store import InMemoryRunStore
 from .models import ReasoningEvent, RunCreateRequest, RunStatus
@@ -157,18 +157,33 @@ class OrchestratorService:
     def _make_clarify_fn(
         self, run_id: str, loop: asyncio.AbstractEventLoop
     ) -> Callable[[str, list[str] | None], str]:
-        """Return a sync callable that can be called from the graph worker thread."""
+        """Return a sync callable that can be called from the graph worker thread.
+
+        When a WebSocket client is subscribed, emits a clarification_request event
+        and waits for the answer. Falls back to stdin when running interactively
+        with no WebSocket client connected (CLI mode).
+        """
         svc = self
 
         def _clarify_sync(
             question: str, options: list[str] | None = None
         ) -> str:
-            coro = svc._request_clarification(run_id, question, options or [])
-            future = asyncio.run_coroutine_threadsafe(coro, loop)
-            try:
-                return future.result(timeout=305.0)
-            except Exception:
-                return ""
+            if svc.store.has_subscribers(run_id):
+                coro = svc._request_clarification(
+                    run_id, question, options or []
+                )
+                future = asyncio.run_coroutine_threadsafe(coro, loop)
+                try:
+                    return future.result(timeout=305.0)
+                except Exception:
+                    return ""
+            if sys.stdin.isatty():
+                print(f"\n[CLARIFY] {question}")
+                if options:
+                    for i, opt in enumerate(options, 1):
+                        print(f"  [{i}] {opt}")
+                return input("  ➜ ").strip() or "No preference / not applicable"
+            return ""
 
         return _clarify_sync
 
@@ -224,6 +239,9 @@ class OrchestratorService:
         loop = asyncio.get_running_loop()
         clarify_fn = self._make_clarify_fn(run_id, loop)
 
+        run_output_dir = (self.output_root / run_id).resolve()
+        run_output_dir.mkdir(parents=True, exist_ok=True)
+
         initial_state: AgentState = {
             "user_request": request.user_request,
             "scope": "",
@@ -238,6 +256,7 @@ class OrchestratorService:
             "qa_passed": False,
             "qa_feedback": "",
             "qa_issues": [],
+            "run_output_dir": str(run_output_dir),
             "iteration": 0,
             "max_iterations": request.max_iterations,
             "mode": request.mode,
@@ -252,9 +271,6 @@ class OrchestratorService:
             "hint_level": 0,
             "validation_feedback": "",
         }
-
-        run_output_dir = self.output_root / run_id
-        run_output_dir.mkdir(parents=True, exist_ok=True)
 
         final_state: AgentState = initial_state
 
@@ -336,16 +352,15 @@ class OrchestratorService:
                             agent=node_name,
                         )
 
-                    # After developer: write code files immediately and notify UI
+                    # After developer: notify UI of generated files
                     if node_name == "developer" and node_update.get(
                         "code_files"
                     ):
                         dev_files = node_update["code_files"]
-                        project_dir_early = (
+                        project_dir_node = (
                             run_output_dir / "output" / "project"
                         ).resolve()
-                        project_dir_early.mkdir(parents=True, exist_ok=True)
-                        saved_paths: list[str] = []
+                        emitted_paths: list[str] = []
 
                         for cf in dev_files:
                             p = cf["path"] if isinstance(cf, dict) else cf.path
@@ -360,10 +375,7 @@ class OrchestratorService:
                                 else cf.language
                             )
                             if p:
-                                dest = project_dir_early / p
-                                dest.parent.mkdir(parents=True, exist_ok=True)
-                                dest.write_text(c, encoding="utf-8")
-                                saved_paths.append(str(dest))
+                                emitted_paths.append(str(project_dir_node / p))
                             await self._emit(
                                 run_id=run_id,
                                 event="file_generated",
@@ -380,12 +392,12 @@ class OrchestratorService:
                         await self._emit(
                             run_id=run_id,
                             event="files_ready",
-                            message=f"{len(saved_paths)} file(s) written — review before QA continues",
+                            message=f"{len(emitted_paths)} file(s) written — review before QA continues",
                             agent="developer",
                             phase="CONSTRUCTION",
                             payload={
-                                "project_dir": str(project_dir_early),
-                                "generated_files": saved_paths,
+                                "project_dir": str(project_dir_node),
+                                "generated_files": emitted_paths,
                                 "iteration": final_state.get("iteration", 0),
                             },
                         )
@@ -484,9 +496,10 @@ class OrchestratorService:
                                     },
                                 )
 
-            # Save all artifacts
+            # Finalise dynamic artifacts (qa_issues, reasoning trace, git init).
+            # All file artifacts were written incrementally by each node.
             output_dir = str(run_output_dir / "output")
-            save_artifacts(final_state, output_dir)
+            finalize_artifacts(final_state, output_dir)
 
             project_dir = (run_output_dir / "output" / "project").resolve()
             generated_files: list[str] = []
