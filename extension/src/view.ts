@@ -17,6 +17,8 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
   private resolvedBackendUrl?: string;
   /** Proposed file contents keyed by relative path, for inline diff editor. */
   private proposedFiles: Map<string, string> = new Map();
+  /** Generated file contents keyed by relative path, from the most recent run. */
+  private generatedFiles: Map<string, string> = new Map();
   /** Output channel that surfaces backend stdout+stderr logs. */
   private outputChannel: vscode.OutputChannel = vscode.window.createOutputChannel("JAME Backend");
 
@@ -27,9 +29,21 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
     return this.proposedFiles.get(filePath) ?? "";
   }
 
+  /** Returns the in-memory proposed files map (live reference). */
+  public getProposedFiles(): Map<string, string> {
+    return this.proposedFiles;
+  }
+
+  /** Returns the in-memory generated files map (live reference). */
+  public getGeneratedFiles(): Map<string, string> {
+    return this.generatedFiles;
+  }
+
   /** Open a VS Code diff editor between workspace file and proposed content. */
   private async openProposedChange(filePath: string, content: string): Promise<void> {
     this.proposedFiles.set(filePath, content);
+    // Also record in generatedFiles so fileReader can find it even without the diff editor open
+    this.generatedFiles.set(filePath, content);
 
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     if (!workspaceRoot) {

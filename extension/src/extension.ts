@@ -2,6 +2,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { JameViewProvider } from "./view";
+import { searchReplaceAcrossFiles, buildRegExp } from "./searchReplace";
+import { listWorkspaceUris, readFiles } from "./fileReader";
 
 export function activate(context: vscode.ExtensionContext): void {
   const provider = new JameViewProvider(context.extensionUri);
@@ -98,6 +100,69 @@ export function activate(context: vscode.ExtensionContext): void {
           }
         }
       }
+    })
+  );
+
+  // Smart search/replace across workspace files
+  context.subscriptions.push(
+    vscode.commands.registerCommand("jameWorkflow.searchReplaceSmart", async () => {
+      // Step 1: gather pattern
+      const pattern = await vscode.window.showInputBox({
+        prompt: "Search pattern (literal or /regex/flags)",
+        placeHolder: "e.g.  old_name  or  /old_name/gi",
+        validateInput: (v) => (v.trim() ? undefined : "Pattern cannot be empty"),
+      });
+      if (!pattern) return;
+
+      // Step 2: gather replacement
+      const replacement = await vscode.window.showInputBox({
+        prompt: "Replace with",
+        placeHolder: "replacement text (use $1, $2 … for regex groups)",
+        value: "",
+      });
+      if (replacement === undefined) return; // cancelled
+
+      // Step 3: gather optional glob filter
+      const globInput = await vscode.window.showInputBox({
+        prompt: "File filter glob (leave blank for **/*)",
+        placeHolder: "e.g. **/*.py  or  src/**/*.ts",
+        value: "",
+      });
+      if (globInput === undefined) return; // cancelled
+      const globPattern = globInput.trim() || "**/*";
+
+      // Parse /pattern/flags syntax
+      const regexMatch = pattern.match(/^\/(.+)\/([gimsuy]*)$/);
+      const isRegex = Boolean(regexMatch);
+      const rawPattern = regexMatch ? regexMatch[1] : pattern;
+      const rawFlags = regexMatch ? regexMatch[2] : "";
+      const caseSensitive = !rawFlags.includes("i");
+      const multiline = rawFlags.includes("s");
+
+      // Validate regex before scanning files
+      try {
+        buildRegExp({ pattern: rawPattern, replacement, isRegex, caseSensitive, multiline });
+      } catch (err) {
+        vscode.window.showErrorMessage(
+          `Invalid regex: ${err instanceof Error ? err.message : String(err)}`
+        );
+        return;
+      }
+
+      // Collect matching workspace URIs
+      const uris = await listWorkspaceUris(globPattern);
+      if (uris.length === 0) {
+        vscode.window.showInformationMessage(`No files match "${globPattern}".`);
+        return;
+      }
+
+      await searchReplaceAcrossFiles(uris, {
+        pattern: rawPattern,
+        replacement,
+        isRegex,
+        caseSensitive,
+        multiline,
+      });
     })
   );
 
