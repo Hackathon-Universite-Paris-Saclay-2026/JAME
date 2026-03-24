@@ -414,16 +414,17 @@ def architect_node(state: AgentState) -> dict:
         )
 
         # Self-critique
-        critique_issues = _self_critique(llm, specs, diagrams)
-        _log(
-            {
-                "agent": "architect",
-                "phase": "self_critique",
-                "content": f"Issues: {critique_issues}"
-                if critique_issues
-                else "Passed.",
-            }
-        )
+        if scope not in ("function", "feature"):
+            critique_issues = _self_critique(llm, specs, diagrams)
+            reasoning_logs.append(
+                {
+                    "agent": "architect",
+                    "phase": "self_critique",
+                    "content": f"Issues: {critique_issues}"
+                    if critique_issues
+                    else "Passed.",
+                }
+            )
 
         # Lightweight scope skips user validation
         if scope in ("function", "feature"):
