@@ -213,7 +213,22 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
 
         if (!resp.ok) {
           const text = await resp.text();
-          throw new Error(`Run creation failed: ${text}`);
+          let friendly = text;
+          try {
+            const json = JSON.parse(text);
+            // Pydantic validation errors: { detail: [{ msg, loc, ctx }] }
+            if (Array.isArray(json.detail)) {
+              friendly = json.detail.map((e: { msg?: string; loc?: string[]; ctx?: { min_length?: number } }) => {
+                if (e.ctx?.min_length) {
+                  return `Prompt too short — at least ${e.ctx.min_length} characters required.`;
+                }
+                return e.msg ?? JSON.stringify(e);
+              }).join(" ");
+            } else if (typeof json.detail === "string") {
+              friendly = json.detail;
+            }
+          } catch { /* not JSON, use raw text */ }
+          throw new Error(friendly);
         }
 
         const data = (await resp.json()) as { run_id: string };
@@ -947,10 +962,23 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
     }
 
     /* ── System messages ─────────────────────────────────────────── */
-    .sys-msg { padding: 2px 12px; font-size: 11px; color: #6a6a6a; }
+    .sys-msg {
+      display: flex; align-items: flex-start; gap: 6px;
+      padding: 4px 12px; font-size: 11px; color: #6a6a6a;
+      line-height: 1.5;
+    }
+    .sys-msg-icon { flex-shrink: 0; font-style: normal; }
+    .sys-msg-text { flex: 1; word-break: break-word; }
     .sys-msg.ok   { color: #4a9d4a; }
     .sys-msg.warn { color: #d7ba7d; }
-    .sys-msg.err  { color: #f48771; }
+    .sys-msg.err  {
+      color: #f48771;
+      background: rgba(244,135,113,0.07);
+      border-left: 2px solid #f48771;
+      border-radius: 0 4px 4px 0;
+      padding: 6px 12px 6px 10px;
+      margin: 2px 8px;
+    }
 
     /* ── File card (legacy, kept for safety) ────────────────────── */
     .file-card {
@@ -1088,27 +1116,90 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
     .clarify-text:focus { border-color: #0e639c; }
     .clarify-card.answered { opacity: 0.6; pointer-events: none; }
 
+    /* ── Slash command suggestion dropdown ──────────────────────── */
+    .slash-suggestions {
+      display: none;
+      position: absolute; bottom: 100%; left: 0; right: 0;
+      background: #252526;
+      border: 1px solid #3e3e42;
+      border-radius: 6px;
+      overflow: hidden;
+      box-shadow: 0 -4px 16px rgba(0,0,0,0.4);
+      z-index: 100;
+      margin-bottom: 4px;
+    }
+    .slash-suggestions.open { display: block; }
+    .slash-suggestion-item {
+      display: flex; align-items: center; gap: 10px;
+      padding: 7px 12px;
+      cursor: pointer;
+      font-size: 12px;
+      transition: background 0.1s;
+    }
+    .slash-suggestion-item:hover,
+    .slash-suggestion-item.active { background: #094771; }
+    .slash-suggestion-name {
+      color: #569cd6; font-weight: 600; flex-shrink: 0;
+    }
+    .slash-suggestion-desc {
+      color: #6a6a6a; font-size: 11px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+
+    /* ── Slash pill inside input ─────────────────────────────────── */
+    .slash-pill {
+      display: none; align-items: center; gap: 4px;
+      background: #0e3a5e; border: 1px solid #0e639c;
+      border-radius: 4px; padding: 1px 6px 1px 7px;
+      font-size: 11px; font-weight: 600; color: #569cd6;
+      white-space: nowrap; flex-shrink: 0; user-select: none;
+      line-height: 18px;
+    }
+    .slash-pill.visible { display: flex; }
+    .slash-pill-x {
+      font-size: 13px; line-height: 1; cursor: pointer;
+      color: #4a8abf; margin-left: 1px;
+      display: flex; align-items: center;
+    }
+    .slash-pill-x:hover { color: #7ec0f0; }
+
     /* ── Input area ──────────────────────────────────────────────── */
     .input-area {
       border-top: 1px solid #3e3e42;
       padding: 10px 12px;
       flex-shrink: 0;
+      position: relative;
     }
 
-    /* ── Mode selector ───────────────────────────────────────────── */
-    .mode-row {
-      display: flex; align-items: center; gap: 6px; margin-bottom: 7px;
+    /* ── Mode badge (top-bar) ─────────────────────────────────────── */
+    .mode-badge {
+      display: flex; align-items: center; gap: 5px;
+      padding: 3px 9px; border-radius: 4px; font-size: 11px; font-weight: 600;
+      letter-spacing: 0.03em; cursor: pointer; user-select: none;
+      border: 1px solid transparent; transition: background 0.15s, border-color 0.15s;
     }
-    .mode-label {
-      font-size: 10px; font-weight: 600; color: #6a6a6a;
-      text-transform: uppercase; letter-spacing: 0.04em; flex-shrink: 0;
+    .mode-badge:hover:not(.locked) { border-color: #3e3e42; background: #2a2d2e; }
+    .mode-badge.locked { cursor: default; opacity: 0.7; }
+    .mode-badge.m-junior { color: #4ec94e; }
+    .mode-badge.m-senior { color: #569cd6; }
+    .mode-badge.m-expert { color: #d4a46a; }
+    .mode-badge-icon { font-size: 12px; }
+    .mode-badge-lock { font-size: 10px; opacity: 0.6; margin-left: 2px; }
+
+    /* ── Mode sub-suggestion (for /mode) ─────────────────────────── */
+    .slash-sub-item {
+      display: flex; flex-direction: column; gap: 2px;
+      padding: 8px 12px; cursor: pointer; transition: background 0.1s;
+      border-left: 2px solid transparent;
     }
-    .mode-select {
-      font-size: 11px; background: #2d2d30; color: #cccccc;
-      border: 1px solid #3e3e42; border-radius: 4px; padding: 2px 6px;
-      cursor: pointer; outline: none;
-    }
-    .mode-select:focus { border-color: #0e639c; }
+    .slash-sub-item:hover,
+    .slash-sub-item.active { background: #094771; }
+    .slash-sub-item.active { border-left-color: #569cd6; }
+    .slash-sub-name { font-size: 12px; font-weight: 600; }
+    .slash-sub-name.m-junior { color: #4ec94e; }
+    .slash-sub-name.m-senior { color: #569cd6; }
+    .slash-sub-name.m-expert { color: #d4a46a; }
+    .slash-sub-desc { font-size: 11px; color: #6a6a6a; line-height: 1.4; }
 
     .input-row {
       display: flex;
@@ -1247,6 +1338,11 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
 <body>
   <div class="shell">
     <div class="top-bar">
+      <div id="modeBadge" class="mode-badge m-senior" title="Click to change mode (or type /mode)">
+        <span class="mode-badge-icon" id="modeBadgeIcon">&#9670;</span>
+        <span id="modeBadgeLabel">Senior</span>
+        <span class="mode-badge-lock" id="modeBadgeLock" style="display:none">&#128274;</span>
+      </div>
       <button class="new-chat-btn" id="newChatBtn" title="New chat — clear conversation">
         <svg viewBox="0 0 16 16" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
           <line x1="8" y1="2" x2="8" y2="14"/>
@@ -1284,15 +1380,12 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
     </div>
 
     <div class="input-area">
-      <div class="mode-row">
-        <span class="mode-label">Mode</span>
-        <select id="modeSelect" class="mode-select">
-          <option value="junior">Junior</option>
-          <option value="senior" selected>Senior</option>
-          <option value="expert">Expert</option>
-        </select>
-      </div>
+      <div id="slashSuggestions" class="slash-suggestions"></div>
       <div class="input-row">
+        <div id="slashPill" class="slash-pill">
+          <span id="slashPillLabel"></span>
+          <span class="slash-pill-x" id="slashPillX">&#x2715;</span>
+        </div>
         <textarea id="input" rows="1" placeholder="Describe what to build..." spellcheck="false"></textarea>
         <button class="stop-btn" id="stopBtn" style="display:none" title="Stop generation">
           <svg viewBox="0 0 10 10"><rect x="1" y="1" width="8" height="8"/></svg>
@@ -1315,6 +1408,16 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
     </div>
   </div>
 
+  <div id="modeChangeConfirm" class="nc-overlay">
+    <div class="nc-modal">
+      <p class="nc-msg" id="modeChangeMsg">Switch to <strong id="modeChangeTarget"></strong> mode?<br>This will <strong>clear the current chat</strong>.</p>
+      <div class="nc-actions">
+        <button id="modeChangeOk"     class="btn btn-primary">Switch &amp; Clear</button>
+        <button id="modeChangeCancel" class="btn btn-secondary">Keep Current</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     const vscode = acquireVsCodeApi();
     const feed         = document.getElementById('feed');
@@ -1322,7 +1425,7 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
     const sendBtn      = document.getElementById('sendBtn');
     const stopBtn      = document.getElementById('stopBtn');
     const progressBar  = document.getElementById('progressBar');
-    const modeSelect   = document.getElementById('modeSelect');
+    const modeSelect   = null; // replaced by modeBadge
     const filesPanel   = document.getElementById('filesPanel');
     const filesPanelBody    = document.getElementById('filesPanelBody');
     const filesPanelSummary = document.getElementById('filesPanelSummary');
@@ -1332,6 +1435,211 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
     const newChatConfirmEl  = document.getElementById('newChatConfirm');
     const newChatConfirmOk  = document.getElementById('newChatConfirmOk');
     const newChatConfirmCancel = document.getElementById('newChatConfirmCancel');
+    const slashSuggestionsEl = document.getElementById('slashSuggestions');
+    const slashPillEl        = document.getElementById('slashPill');
+    const slashPillLabel     = document.getElementById('slashPillLabel');
+    const slashPillX         = document.getElementById('slashPillX');
+    const modeBadgeEl        = document.getElementById('modeBadge');
+    const modeBadgeLabelEl   = document.getElementById('modeBadgeLabel');
+    const modeBadgeLockEl    = document.getElementById('modeBadgeLock');
+    const modeChangeConfirmEl  = document.getElementById('modeChangeConfirm');
+    const modeChangeTargetEl   = document.getElementById('modeChangeTarget');
+    const modeChangeOkEl       = document.getElementById('modeChangeOk');
+    const modeChangeCancelEl   = document.getElementById('modeChangeCancel');
+    let pendingMode = null;
+
+    modeChangeOkEl.addEventListener('click', () => {
+      modeChangeConfirmEl.style.display = 'none';
+      if (pendingMode) {
+        unlockMode();
+        applyMode(pendingMode);
+        pendingMode = null;
+        doNewChat();
+      }
+    });
+    modeChangeCancelEl.addEventListener('click', () => {
+      modeChangeConfirmEl.style.display = 'none';
+      pendingMode = null;
+    });
+
+    // ── Mode state ────────────────────────────────────────────────
+    const MODE_META = {
+      junior: { label: 'Junior', icon: '&#9671;', cls: 'm-junior',
+                desc: 'Learning mode — step-by-step guidance, clarifications, human in the loop at every decision' },
+      senior: { label: 'Senior', icon: '&#9670;', cls: 'm-senior',
+                desc: 'Collaborative mode — human in the loop, reviews before executing significant changes' },
+      expert: { label: 'Expert', icon: '&#9654;', cls: 'm-expert',
+                desc: 'Autonomous mode — runs without interruption, only pauses for genuinely dangerous commands' },
+    };
+    let currentMode = 'senior';
+    let modeLocked  = false;
+
+    function applyMode(mode) {
+      if (modeLocked) return;
+      if (!MODE_META[mode]) return;
+      currentMode = mode;
+      const m = MODE_META[mode];
+      modeBadgeEl.className = 'mode-badge ' + m.cls;
+      modeBadgeLabelEl.textContent = m.label;
+      modeBadgeEl.title = m.desc;
+    }
+
+    function lockMode() {
+      modeLocked = true;
+      modeBadgeEl.classList.add('locked');
+      modeBadgeLockEl.style.display = '';
+    }
+
+    function unlockMode() {
+      modeLocked = false;
+      modeBadgeEl.classList.remove('locked');
+      modeBadgeLockEl.style.display = 'none';
+    }
+
+    // Badge click → open /mode sub-suggestions (only when unlocked)
+    modeBadgeEl.addEventListener('click', () => {
+      if (modeLocked) return;
+      openModeSuggestions();
+      inputEl.focus();
+    });
+
+    // ── Slash command registry ────────────────────────────────────
+    const SLASH_COMMANDS = [
+      { name: '/mode',   desc: 'Switch mode for this chat' },
+      { name: '/fix',    desc: 'Ask the agent to fix an issue in generated code' },
+      { name: '/explain',desc: 'Explain the last generated code or output' },
+      { name: '/retry',  desc: 'Retry the last failed build' },
+      { name: '/clear',  desc: 'Clear conversation and start fresh' },
+    ];
+
+    // Active slash command state
+    let activeSlashCmd = null;   // e.g. '/fix'
+    let suggestionIndex = -1;
+
+    // ── Slash suggestion helpers ──────────────────────────────────
+    function openSuggestions(query) {
+      const matches = query === ''
+        ? SLASH_COMMANDS
+        : SLASH_COMMANDS.filter(c => c.name.startsWith('/' + query));
+      if (matches.length === 0) { closeSuggestions(); return; }
+
+      suggestionIndex = 0;
+      slashSuggestionsEl.innerHTML = '';
+      matches.forEach((cmd, i) => {
+        const item = document.createElement('div');
+        item.className = 'slash-suggestion-item' + (i === 0 ? ' active' : '');
+        item.dataset.cmd = cmd.name;
+        item.innerHTML =
+          '<span class="slash-suggestion-name">' + escHtml(cmd.name) + '</span>' +
+          '<span class="slash-suggestion-desc">' + escHtml(cmd.desc) + '</span>';
+        item.addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          selectSlashCommand(cmd.name);
+        });
+        slashSuggestionsEl.appendChild(item);
+      });
+      slashSuggestionsEl.classList.add('open');
+    }
+
+    function openModeSuggestions() {
+      slashSuggestionsEl.innerHTML = '';
+      const modes = ['junior', 'senior', 'expert'];
+      suggestionIndex = modes.indexOf(currentMode);
+      if (suggestionIndex === -1) suggestionIndex = 0;
+      modes.forEach((mode, i) => {
+        const m = MODE_META[mode];
+        const item = document.createElement('div');
+        item.className = 'slash-sub-item' + (i === suggestionIndex ? ' active' : '');
+        item.dataset.mode = mode;
+        item.innerHTML =
+          '<span class="slash-sub-name ' + m.cls + '">' + m.icon + ' ' + escHtml(m.label) + '</span>' +
+          '<span class="slash-sub-desc">' + escHtml(m.desc) + '</span>';
+        item.addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          selectMode(mode);
+        });
+        slashSuggestionsEl.appendChild(item);
+      });
+      slashSuggestionsEl.classList.add('open');
+    }
+
+    function selectMode(mode) {
+      if (modeLocked) {
+        pendingMode = mode;
+        modeChangeTargetEl.textContent = MODE_META[mode]?.label ?? mode;
+        modeChangeConfirmEl.style.display = 'flex';
+        closeSuggestions();
+        return;
+      }
+      applyMode(mode);
+      // Clear the /mode token from the input
+      const raw = inputEl.value;
+      const slashMatch = raw.match(new RegExp('^([ \\t]*)[/][^ \\t]*'));
+      inputEl.value = slashMatch ? raw.slice(slashMatch[0].length).trimStart() : raw;
+      inputEl.style.height = 'auto';
+      inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + 'px';
+      closeSuggestions();
+      inputEl.focus();
+    }
+
+    function closeSuggestions() {
+      slashSuggestionsEl.classList.remove('open');
+      slashSuggestionsEl.innerHTML = '';
+      suggestionIndex = -1;
+    }
+
+    function moveSuggestion(dir) {
+      const items = slashSuggestionsEl.querySelectorAll('.slash-suggestion-item, .slash-sub-item');
+      if (items.length === 0) return false;
+      items[suggestionIndex]?.classList.remove('active');
+      suggestionIndex = (suggestionIndex + dir + items.length) % items.length;
+      items[suggestionIndex].classList.add('active');
+      return true;
+    }
+
+    function selectActiveSuggestion() {
+      const cmdItem = slashSuggestionsEl.querySelector('.slash-suggestion-item.active');
+      if (cmdItem) { selectSlashCommand(cmdItem.dataset.cmd); return; }
+      const modeItem = slashSuggestionsEl.querySelector('.slash-sub-item.active');
+      if (modeItem) { selectMode(modeItem.dataset.mode); }
+    }
+
+    function selectSlashCommand(name) {
+      if (name === '/clear') { closeSuggestions(); inputEl.value = ''; doNewChat(); return; }
+      if (name === '/mode') {
+        // Clear the /mode token and open mode sub-picker
+        const raw = inputEl.value;
+        const slashMatch = raw.match(new RegExp('^([ \\t]*)[/][^ \\t]*'));
+        inputEl.value = slashMatch ? raw.slice(slashMatch[0].length).trimStart() : raw;
+        closeSuggestions();
+        openModeSuggestions();
+        return;
+      }
+      // Regular slash command → becomes a pill prefix
+      activeSlashCmd = name;
+      slashPillLabel.textContent = name;
+      slashPillEl.classList.add('visible');
+      const raw = inputEl.value;
+      const slashMatch = raw.match(new RegExp('^([ \\t]*)[/][^ \\t]*'));
+      inputEl.value = slashMatch ? raw.slice(slashMatch[0].length) : raw;
+      inputEl.style.height = 'auto';
+      inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + 'px';
+      closeSuggestions();
+      inputEl.focus();
+    }
+
+    function clearSlashCommand() {
+      activeSlashCmd = null;
+      slashPillEl.classList.remove('visible');
+      slashPillLabel.textContent = '';
+    }
+
+    // Dismiss pill when X is clicked
+    slashPillX.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      clearSlashCommand();
+      inputEl.focus();
+    });
 
     newChatConfirmOk.addEventListener('click', () => {
       newChatConfirmEl.style.display = 'none';
@@ -1363,6 +1671,8 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
         fpSummary:   filesPanelSummary.textContent,
         currentRunId: currentRunId,
         isRunning:   isRunning,
+        currentMode: currentMode,
+        modeLocked:  modeLocked,
       });
     }
 
@@ -1377,6 +1687,8 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
       if (s.fpSummary)  { filesPanelSummary.textContent = s.fpSummary; }
       if (s.fpVisible)  { filesPanel.classList.add('visible'); }
       if (s.currentRunId) { currentRunId = s.currentRunId; }
+      if (s.currentMode) { applyMode(s.currentMode); }
+      if (s.modeLocked)  { lockMode(); }
       // Restore running state display (but don't re-enable input — run may be over)
       if (s.isRunning)  { setRunning(true); }
     })();
@@ -1514,7 +1826,7 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
     let historyIndex     = -1;   // -1 = not browsing history
     let historyDraft     = '';   // saved draft while browsing
 
-    // ── Auto-resize textarea ─────────────────────────────────────
+    // ── Auto-resize textarea + slash detection ────────────────────
     inputEl.addEventListener('input', () => {
       inputEl.style.height = 'auto';
       inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + 'px';
@@ -1523,14 +1835,48 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
         historyIndex = -1;
         historyDraft = '';
       }
+      // Slash suggestion: only trigger when no pill is active and input
+      // starts with optional whitespace + '/' (nothing else before it)
+      if (!activeSlashCmd) {
+        const val = inputEl.value;
+        const slashMatch = val.match(new RegExp('^[ \\t]*[/]([a-zA-Z0-9_-]*)$'));
+        if (slashMatch) {
+          openSuggestions(slashMatch[1]);
+        } else {
+          closeSuggestions();
+        }
+      }
     });
 
     // ── Keyboard ─────────────────────────────────────────────────
     inputEl.addEventListener('keydown', (e) => {
+      // Suggestion navigation
+      if (slashSuggestionsEl.classList.contains('open')) {
+        if (e.key === 'ArrowDown') { e.preventDefault(); moveSuggestion(1); return; }
+        if (e.key === 'ArrowUp')   { e.preventDefault(); moveSuggestion(-1); return; }
+        if (e.key === 'Escape')    { e.preventDefault(); closeSuggestions(); return; }
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          selectActiveSuggestion();
+          return;
+        }
+        if (e.key === 'Tab') {
+          e.preventDefault();
+          selectActiveSuggestion();
+          return;
+        }
+      }
+
       // Enter → send (Shift+Enter inserts newline naturally via default)
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         send();
+        return;
+      }
+
+      // Backspace at empty input with active pill → remove pill
+      if (e.key === 'Backspace' && activeSlashCmd && inputEl.value === '') {
+        clearSlashCommand();
         return;
       }
 
@@ -2057,13 +2403,18 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
     // ── Send / stop ───────────────────────────────────────────────
     function send() {
       const text = inputEl.value.trim();
-      if (!text || isRunning) return;
+      const slashCmd = activeSlashCmd;
+      // Allow send with just a slash command and no body text
+      if (!text && !slashCmd || isRunning) return;
 
-      const mode = modeSelect ? modeSelect.value : 'senior';
+      const mode = currentMode;
+
+      // Build display text: pill label + body
+      const displayText = slashCmd ? slashCmd + (text ? ' ' + text : '') : text;
 
       // Save to prompt history (avoid duplicating the last entry)
-      if (promptHistory.length === 0 || promptHistory[promptHistory.length - 1] !== text) {
-        promptHistory.push(text);
+      if (promptHistory.length === 0 || promptHistory[promptHistory.length - 1] !== displayText) {
+        promptHistory.push(displayText);
       }
       historyIndex = -1;
       historyDraft = '';
@@ -2076,12 +2427,15 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
       _lastRowAc = null;
       resetFilesPanel();
 
-      addUserMessage(text);
+      addUserMessage(displayText);
       inputEl.value = '';
       inputEl.style.height = 'auto';
+      clearSlashCommand();
+      closeSuggestions();
+      lockMode();
       setRunning(true);
 
-      vscode.postMessage({ command: 'startRun', userRequest: text, mode });
+      vscode.postMessage({ command: 'startRun', userRequest: displayText, mode, slashCommand: slashCmd });
     }
 
     function stop() {
@@ -2114,6 +2468,9 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
       promptHistory = [];
       historyIndex = -1;
       historyDraft = '';
+      clearSlashCommand();
+      closeSuggestions();
+      unlockMode();
       if (ws) { ws.close(); ws = null; }
 
       // Reset UI
