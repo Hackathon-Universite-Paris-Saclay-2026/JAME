@@ -118,8 +118,21 @@ def _triage(
     return priority_map
 
 
+def _format_tool_output(tool_issues: list[QAIssue]) -> str:
+    """Render tool issues as a readable block for prompt injection."""
+    if not tool_issues:
+        return "No tool issues found."
+    return "\n".join(
+        f"- [{i.severity}] {i.description}" for i in tool_issues
+    )
+
+
 def _analyse_file(
-    llm: BaseChatModel, specs: str, code_file: CodeFile, priority: str
+    llm: BaseChatModel,
+    specs: str,
+    code_file: CodeFile,
+    priority: str,
+    tool_issues: list[QAIssue] | None = None,
 ) -> dict:
     """AI-DLC Static Review — single file analysis."""
     print(f"[REVIEW] {code_file.path} [{priority}] …")
@@ -132,6 +145,7 @@ def _analyse_file(
                     file_path=code_file.path,
                     language=code_file.language,
                     content=code_file.content,
+                    tool_output=_format_tool_output(tool_issues or []),
                 )
             )
         ]
@@ -193,7 +207,11 @@ def _cross_file_check(
 
 
 def _generate_fix_instructions(
-    llm: BaseChatModel, specs: str, code_file: CodeFile, issues: list[dict]
+    llm: BaseChatModel,
+    specs: str,
+    code_file: CodeFile,
+    issues: list[dict],
+    tool_issues: list[QAIssue] | None = None,
 ) -> str:
     """AI-DLC Fix — patch instructions or full rewrite brief."""
     critical_count = sum(1 for i in issues if i.get("severity") == "critical")
@@ -232,6 +250,7 @@ def _generate_fix_instructions(
                 HumanMessage(
                     content=PATCH_INSTRUCTIONS_PROMPT.format(
                         file_path=code_file.path,
+                        tool_output=_format_tool_output(tool_issues or []),
                         issues=issues_text,
                         language=code_file.language,
                         content=code_file.content,
@@ -583,6 +602,7 @@ def qa_node(state: AgentState) -> dict:
     # ── [TOOL CHECKS] ruff + pytest before LLM review ────────────────────────
     run_output_dir = state.get("run_output_dir", "")
     tool_call_fn = state.get("tool_call_callback")
+    tool_issues: list[QAIssue] = []
 
     if run_output_dir:
         project_dir = Path(run_output_dir) / "output" / "project"
@@ -648,6 +668,15 @@ def qa_node(state: AgentState) -> dict:
     )
 
     # ── [REVIEW] All files in parallel (critical-first order preserved) ───────
+    # Build a per-file index of tool issues so REVIEW and FIX see exact diagnostics.
+    # ruff emits absolute paths; match on basename as a fallback.
+    tool_issues_by_file: dict[str, list[QAIssue]] = {}
+    for issue in tool_issues:
+        for cf in code_files:
+            if cf.path in issue.file or issue.file.endswith(cf.path):
+                tool_issues_by_file.setdefault(cf.path, []).append(issue)
+                break
+
     ordered_files = sorted(
         code_files,
         key=lambda f: {"critical": 0, "important": 1, "standard": 2}.get(
@@ -662,6 +691,7 @@ def qa_node(state: AgentState) -> dict:
                 specs,
                 f,
                 priority_map.get(f.path, "standard"),
+                tool_issues_by_file.get(f.path, []),
             )
             for f in ordered_files
         ]
@@ -731,6 +761,15 @@ def qa_node(state: AgentState) -> dict:
         if code_file is not None:
             files_to_fix.append((result, code_file))
 
+    print(f"[FIX] Generating fix instructions for {len(files_to_fix)} file(s) …")
+    _log(
+        {
+            "agent": "qa",
+            "phase": "act",
+            "content": f"Generating fix instructions for {len(files_to_fix)} file(s)…",
+        }
+    )
+
     instructions_list: list[str] = run_parallel(
         [
             partial(
@@ -739,6 +778,7 @@ def qa_node(state: AgentState) -> dict:
                 specs,
                 code_file,
                 result["issues"],
+                tool_issues_by_file.get(code_file.path, []),
             )
             for result, code_file in files_to_fix
         ]
@@ -776,7 +816,7 @@ def qa_node(state: AgentState) -> dict:
             {
                 "agent": "qa",
                 "phase": "reason",
-                "content": f"AI-DLC QA decision: FAIL at iteration {iteration + 1}. Feedback dispatched.",
+                "content": f"Issues found — routing back to Developer for fixes (iteration {iteration + 1}/{max_iterations}).",
             }
         )
         return {
