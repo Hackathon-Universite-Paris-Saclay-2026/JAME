@@ -757,7 +757,7 @@ def _run_project_qa(
             {
                 "agent": "qa",
                 "phase": "act",
-                "content": f"Test relevancy: {relevancy_feedback[:300]}",
+                "content": f"Test relevancy: {relevancy_feedback}",
             }
         )
         if "FIX THE CODE" in relevancy_feedback:
