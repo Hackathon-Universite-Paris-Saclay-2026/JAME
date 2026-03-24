@@ -17,6 +17,8 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
   private resolvedBackendUrl?: string;
   /** Proposed file contents keyed by relative path, for inline diff editor. */
   private proposedFiles: Map<string, string> = new Map();
+  /** Output channel that surfaces backend stdout+stderr logs. */
+  private outputChannel: vscode.OutputChannel = vscode.window.createOutputChannel("JAME Backend");
 
   constructor(private readonly extensionUri: vscode.Uri) {}
 
@@ -184,6 +186,11 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
 
       if (msg.command === "discardAll") {
         await this.discardAllProposed(msg.paths);
+        return;
+      }
+
+      if (msg.command === "showLogs") {
+        this.outputChannel.show(true);
         return;
       }
 
@@ -527,19 +534,29 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
 
     // Capture stderr so startup crashes surface a useful error message
     let stderrOutput = "";
+    this.outputChannel.clear();
+    this.outputChannel.appendLine(`[JAME] Starting backend on ${backendUrl}`);
     this.backendProcess = spawn(
       venvPython,
       ["-m", "uvicorn", "api.app:app", "--host", "0.0.0.0", "--port", port],
       {
         cwd: repoRoot,
-        stdio: ["ignore", "ignore", "pipe"],
+        stdio: ["ignore", "pipe", "pipe"],
         detached: false,
       }
     );
 
+    if (this.backendProcess.stdout) {
+      this.backendProcess.stdout.on("data", (chunk: Buffer) => {
+        this.outputChannel.append(chunk.toString());
+      });
+    }
+
     if (this.backendProcess.stderr) {
       this.backendProcess.stderr.on("data", (chunk: Buffer) => {
-        stderrOutput += chunk.toString();
+        const text = chunk.toString();
+        stderrOutput += text;
+        this.outputChannel.append(text);
         // Keep only the last 2000 chars to avoid unbounded growth
         if (stderrOutput.length > 2000) {
           stderrOutput = stderrOutput.slice(-2000);
@@ -1098,36 +1115,74 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
 
     /* ── Clarification card ───────────────────────────────────────── */
     .clarify-card {
-      margin: 6px 12px;
-      border: 1px solid #2a4a6a;
-      border-radius: 5px;
-      background: #141e2a;
+      margin: 6px 10px;
+      border: 1px solid #3e3e42;
+      border-radius: 6px;
+      background: #1e1e1e;
       overflow: hidden;
+      font-size: 12px;
     }
-    .clarify-card-header {
-      display: flex; align-items: center; gap: 8px;
-      padding: 7px 12px;
-      background: #1a2a3a;
-      border-bottom: 1px solid #2a3a4a;
+    .clarify-q {
+      padding: 10px 12px 8px;
+      font-size: 12px; color: #c5c5c5; line-height: 1.4;
+      border-bottom: 1px solid #3e3e42;
     }
-    .clarify-card-title { font-size: 11px; font-weight: 600; color: #7ec0f0; flex: 1; }
-    .clarify-card-body  { padding: 8px 12px; display: flex; flex-direction: column; gap: 6px; }
-    .clarify-question   { font-size: 12px; color: #c5c5c5; line-height: 1.5; }
-    .clarify-options    { display: flex; flex-direction: column; gap: 4px; }
-    .clarify-option-btn {
-      text-align: left; padding: 5px 9px; font-size: 11px;
-      background: #1e2d3d; border: 1px solid #2a4a6a; border-radius: 4px;
-      color: #c5c5c5; cursor: pointer; transition: background 0.15s;
+    .clarify-opts { display: flex; flex-direction: column; }
+    .clarify-opt {
+      display: flex; align-items: flex-start; gap: 10px;
+      padding: 8px 12px; cursor: pointer;
+      border-bottom: 1px solid #2d2d2d;
+      transition: background 0.1s;
     }
-    .clarify-option-btn:hover { background: #263d54; }
-    .clarify-input-row  { display: flex; gap: 6px; }
-    .clarify-text       {
-      flex: 1; padding: 5px 8px; font-size: 11px; font-family: inherit;
+    .clarify-opt:last-child { border-bottom: none; }
+    .clarify-opt:hover { background: #2a2d2e; }
+    .clarify-opt.selected { background: #252526; }
+    .clarify-opt-num {
+      flex-shrink: 0; width: 16px;
+      font-size: 11px; color: #6a6a6a; padding-top: 1px;
+    }
+    .clarify-opt-body { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+    .clarify-opt-label { font-size: 12px; font-weight: 600; color: #d4d4d4; }
+    .clarify-opt-desc  { font-size: 11px; color: #6a6a6a; }
+    .clarify-opt-check {
+      flex-shrink: 0; font-size: 13px; color: #4a9d4a;
+      visibility: hidden;
+    }
+    .clarify-opt.selected .clarify-opt-check { visibility: visible; }
+    .clarify-footer {
+      display: flex; align-items: center; gap: 4px;
+      padding: 5px 10px;
+      border-top: 1px solid #3e3e42;
+      background: #181818;
+    }
+    .clarify-nav {
+      background: none; border: none; color: #6a6a6a;
+      cursor: pointer; font-size: 13px; padding: 2px 4px;
+      border-radius: 3px; line-height: 1;
+    }
+    .clarify-nav:hover:not(:disabled) { color: #c5c5c5; background: #2d2d30; }
+    .clarify-nav:disabled { opacity: 0.25; cursor: default; }
+    .clarify-page { font-size: 10px; color: #6a6a6a; margin-right: auto; }
+    .clarify-free-row {
+      display: flex; gap: 6px;
+      padding: 6px 10px;
+      border-top: 1px solid #3e3e42;
+    }
+    .clarify-text {
+      flex: 1; padding: 4px 8px; font-size: 11px; font-family: inherit;
       background: #2d2d30; border: 1px solid #3e3e42; border-radius: 4px;
-      color: #d4d4d4; outline: none; resize: none; min-height: 32px; max-height: 80px;
+      color: #d4d4d4; outline: none; resize: none; min-height: 28px; max-height: 60px;
     }
     .clarify-text:focus { border-color: #0e639c; }
-    .clarify-card.answered { opacity: 0.6; pointer-events: none; }
+    /* Answered: collapses to Q/A summary */
+    .clarify-summary {
+      margin: 2px 10px;
+      padding: 5px 10px;
+      border-left: 2px solid #3e3e42;
+      font-size: 11px; line-height: 1.5;
+    }
+    .clarify-summary .cs-q { color: #6a6a6a; }
+    .clarify-summary .cs-a { color: #c5c5c5; font-weight: 600; }
 
     /* ── Slash command suggestion dropdown ──────────────────────── */
     .slash-suggestions {
@@ -1554,6 +1609,7 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
       { name: '/retry',  desc: 'Retry the last failed build' },
       { name: '/clear',  desc: 'Clear conversation and start fresh' },
       { name: '/fun',    desc: 'Toggle the spirit of JAME' },
+      { name: '/logs',   desc: 'Show backend output in the VS Code panel' },
     ];
 
     // Active slash command state
@@ -1670,6 +1726,15 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
 
     function selectSlashCommand(name) {
       if (name === '/clear') { closeSuggestions(); inputEl.value = ''; doNewChat(); return; }
+      if (name === '/logs') {
+        const raw = inputEl.value;
+        const slashMatch = raw.match(new RegExp('^([ \\t]*)[/][^ \\t]*'));
+        inputEl.value = slashMatch ? raw.slice(slashMatch[0].length).trimStart() : raw;
+        closeSuggestions();
+        vscode.postMessage({ command: 'showLogs' });
+        inputEl.focus();
+        return;
+      }
       if (name === '/fun') {
         _funMode = !_funMode;
         setJameTitle(_funMode);
@@ -2417,70 +2482,124 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
     }
 
     // ── Clarification card ────────────────────────────────────────
+    const CLARIFY_PAGE_SIZE = 4;
+
     function showClarificationCard(question, options) {
+      const opts = options && options.length > 0 ? options : [];
+      let page = 0;
+      let selectedOpt = null; // index into opts, or null
+      const totalPages = opts.length > 0 ? Math.ceil(opts.length / CLARIFY_PAGE_SIZE) : 0;
+
       const card = document.createElement('div');
       card.className = 'clarify-card fade-in';
 
-      const header = document.createElement('div');
-      header.className = 'clarify-card-header';
-      const title = document.createElement('div');
-      title.className = 'clarify-card-title';
-      title.textContent = 'Architect needs clarification';
-      header.appendChild(title);
-      card.appendChild(header);
-
-      const body = document.createElement('div');
-      body.className = 'clarify-card-body';
-
+      // Question header
       const qEl = document.createElement('div');
-      qEl.className = 'clarify-question';
-      qEl.innerHTML = renderMd(question);
-      body.appendChild(qEl);
+      qEl.className = 'clarify-q';
+      qEl.textContent = question;
+      card.appendChild(qEl);
 
-      const submitAnswer = (answer) => {
-        if (!answer.trim()) return;
-        card.classList.add('answered');
-        addSysMsg('Clarification submitted: ' + answer, 'ok');
-        vscode.postMessage({ command: 'submitClarification', runId: currentRunId, answer: answer.trim() });
-      };
+      // Options list
+      const optsEl = document.createElement('div');
+      optsEl.className = 'clarify-opts';
+      card.appendChild(optsEl);
 
-      // Option buttons
-      if (options && options.length > 0) {
-        const optDiv = document.createElement('div');
-        optDiv.className = 'clarify-options';
-        options.forEach((opt, i) => {
-          const btn = document.createElement('button');
-          btn.className = 'clarify-option-btn';
-          btn.textContent = String.fromCharCode(65 + i) + '. ' + opt;
-          btn.addEventListener('click', () => submitAnswer(opt));
-          optDiv.appendChild(btn);
+      function renderPage() {
+        optsEl.innerHTML = '';
+        const start = page * CLARIFY_PAGE_SIZE;
+        const slice = opts.slice(start, start + CLARIFY_PAGE_SIZE);
+        slice.forEach((opt, i) => {
+          const globalIdx = start + i;
+          // Support "label|desc" or plain string
+          const parts = opt.split('|');
+          const label = parts[0].trim();
+          const desc  = parts[1] ? parts[1].trim() : '';
+
+          const row = document.createElement('div');
+          row.className = 'clarify-opt' + (selectedOpt === globalIdx ? ' selected' : '');
+          row.innerHTML =
+            '<span class="clarify-opt-num">' + (globalIdx + 1) + '</span>' +
+            '<span class="clarify-opt-body">' +
+              '<span class="clarify-opt-label">' + escHtml(label) + '</span>' +
+              (desc ? '<span class="clarify-opt-desc">' + escHtml(desc) + '</span>' : '') +
+            '</span>' +
+            '<span class="clarify-opt-check">&#10003;</span>';
+          row.addEventListener('click', () => {
+            selectedOpt = globalIdx;
+            submitAnswer(label);
+          });
+          optsEl.appendChild(row);
         });
-        body.appendChild(optDiv);
       }
 
-      // Free-text input
-      const inputRow = document.createElement('div');
-      inputRow.className = 'clarify-input-row';
-
+      // Free-text row
+      const freeRow = document.createElement('div');
+      freeRow.className = 'clarify-free-row';
       const textArea = document.createElement('textarea');
       textArea.className = 'clarify-text';
-      textArea.placeholder = 'Or type your own clarification...';
+      textArea.placeholder = opts.length ? 'Or type your own answer…' : 'Type your answer…';
       textArea.rows = 1;
-      inputRow.appendChild(textArea);
-
-      const submitBtn = document.createElement('button');
-      submitBtn.className = 'btn btn-primary';
-      submitBtn.textContent = 'Send';
-      submitBtn.addEventListener('click', () => submitAnswer(textArea.value));
+      const sendBtn = document.createElement('button');
+      sendBtn.className = 'btn btn-primary';
+      sendBtn.style.cssText = 'padding:4px 10px;font-size:11px;align-self:flex-end';
+      sendBtn.textContent = 'Send';
+      sendBtn.addEventListener('click', () => submitAnswer(textArea.value));
       textArea.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitAnswer(textArea.value); }
       });
-      inputRow.appendChild(submitBtn);
-      body.appendChild(inputRow);
+      freeRow.appendChild(textArea);
+      freeRow.appendChild(sendBtn);
+      card.appendChild(freeRow);
 
-      card.appendChild(body);
+      // Pagination footer (only if multiple pages)
+      let prevBtn, nextBtn, pageLabel;
+      if (totalPages > 1) {
+        const footer = document.createElement('div');
+        footer.className = 'clarify-footer';
+        prevBtn = document.createElement('button');
+        prevBtn.className = 'clarify-nav';
+        prevBtn.innerHTML = '&#8249;';
+        prevBtn.addEventListener('click', () => { if (page > 0) { page--; renderPage(); updateNav(); } });
+        nextBtn = document.createElement('button');
+        nextBtn.className = 'clarify-nav';
+        nextBtn.innerHTML = '&#8250;';
+        nextBtn.addEventListener('click', () => { if (page < totalPages - 1) { page++; renderPage(); updateNav(); } });
+        pageLabel = document.createElement('span');
+        pageLabel.className = 'clarify-page';
+        footer.appendChild(prevBtn);
+        footer.appendChild(nextBtn);
+        footer.appendChild(pageLabel);
+        card.appendChild(footer);
+      }
+
+      function updateNav() {
+        if (!prevBtn) return;
+        prevBtn.disabled = page === 0;
+        nextBtn.disabled = page === totalPages - 1;
+        pageLabel.textContent = (page + 1) + '/' + totalPages;
+      }
+
+      function submitAnswer(answer) {
+        if (!answer.trim()) return;
+        const ans = answer.trim();
+        // Replace card with compact Q/A summary
+        const summary = document.createElement('div');
+        summary.className = 'clarify-summary fade-in';
+        summary.innerHTML =
+          '<span class="cs-q">Q: ' + escHtml(question) + '</span><br>' +
+          '<span class="cs-a">A: ' + escHtml(ans) + '</span>';
+        card.replaceWith(summary);
+        vscode.postMessage({ command: 'submitClarification', runId: currentRunId, answer: ans });
+        saveState();
+      }
+
+      if (opts.length > 0) renderPage();
+      else optsEl.remove();
+      updateNav();
+
       feed.appendChild(card);
       scrollFeed();
+      saveState();
     }
 
     // ── Send / stop ───────────────────────────────────────────────
