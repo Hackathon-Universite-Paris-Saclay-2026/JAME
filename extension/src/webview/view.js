@@ -1000,6 +1000,112 @@ function showClarificationCard(question, options) {
   scrollFeed();
 }
 
+// Specs review card — approve or request revision
+function showSpecsReviewCard(question, specs) {
+  const card = document.createElement('div');
+  card.className = 'specs-review-card fade-in';
+
+  const header = document.createElement('div');
+  header.className = 'specs-review-header';
+  header.innerHTML =
+    '<span class="specs-review-icon">&#128196;</span>' +
+    '<span class="specs-review-title">Specifications Review</span>';
+  card.appendChild(header);
+
+  const qEl = document.createElement('div');
+  qEl.className = 'specs-review-question';
+  qEl.textContent = question;
+  card.appendChild(qEl);
+
+  if (specs) {
+    const details = document.createElement('details');
+    details.className = 'specs-review-details';
+    const summary = document.createElement('summary');
+    summary.className = 'specs-review-summary';
+    summary.textContent = 'View specifications';
+    details.appendChild(summary);
+    const pre = document.createElement('pre');
+    pre.className = 'specs-review-content';
+    pre.textContent = specs;
+    details.appendChild(pre);
+    card.appendChild(details);
+  }
+
+  const feedbackRow = document.createElement('div');
+  feedbackRow.className = 'specs-review-feedback-row';
+  feedbackRow.style.display = 'none';
+  const feedbackArea = document.createElement('textarea');
+  feedbackArea.className = 'clarify-text';
+  feedbackArea.placeholder = 'Describe what you want changed…';
+  feedbackArea.rows = 3;
+  feedbackRow.appendChild(feedbackArea);
+  card.appendChild(feedbackRow);
+
+  const actions = document.createElement('div');
+  actions.className = 'specs-review-actions';
+
+  const approveBtn = document.createElement('button');
+  approveBtn.className = 'btn btn-success';
+  approveBtn.textContent = '✓ Approve – start coding';
+
+  const reviseBtn = document.createElement('button');
+  reviseBtn.className = 'btn btn-secondary';
+  reviseBtn.textContent = '✎ Request revision';
+
+  const sendReviseBtn = document.createElement('button');
+  sendReviseBtn.className = 'btn btn-primary';
+  sendReviseBtn.textContent = 'Send revision';
+  sendReviseBtn.style.display = 'none';
+
+  actions.appendChild(approveBtn);
+  actions.appendChild(reviseBtn);
+  actions.appendChild(sendReviseBtn);
+  card.appendChild(actions);
+
+  function settle(action, feedback) {
+    approveBtn.disabled = true;
+    reviseBtn.disabled = true;
+    sendReviseBtn.disabled = true;
+    feedbackArea.disabled = true;
+    const summary = document.createElement('div');
+    summary.className = 'clarify-summary';
+    summary.innerHTML =
+      '<div class="cs-q">Specifications review</div>' +
+      '<div class="cs-a">' + escHtml(action === 'approve' ? 'Approved — proceeding to code generation.' : 'Revision requested: ' + feedback) + '</div>';
+    card.replaceWith(summary);
+    // Use the same /clarify endpoint — answer is 'approve' or the feedback text
+    const answer = action === 'approve' ? 'approve' : (feedback || 'revise');
+    vscode.postMessage({ command: 'submitClarification', runId: currentRunId, answer });
+    scrollFeed();
+  }
+
+  approveBtn.addEventListener('click', () => settle('approve', ''));
+
+  reviseBtn.addEventListener('click', () => {
+    feedbackRow.style.display = '';
+    reviseBtn.style.display = 'none';
+    sendReviseBtn.style.display = '';
+    feedbackArea.focus();
+  });
+
+  sendReviseBtn.addEventListener('click', () => {
+    const fb = feedbackArea.value.trim();
+    if (!fb) { feedbackArea.focus(); return; }
+    settle('revise', fb);
+  });
+
+  feedbackArea.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      const fb = feedbackArea.value.trim();
+      if (fb) settle('revise', fb);
+    }
+  });
+
+  feed.appendChild(card);
+  scrollFeed();
+}
+
 // Send / stop
 function send() {
   const text = inputEl.value.trim();
@@ -1267,6 +1373,14 @@ function handleServerEvent(data) {
     const question = p.question || data.message || 'Please clarify:';
     const options = p.options || [];
     showClarificationCard(question, options);
+    return;
+  }
+
+  if (event === 'specs_review_request') {
+    const p = data.payload || {};
+    const question = p.question || data.message || 'Review specifications:';
+    const specs = p.specs || '';
+    showSpecsReviewCard(question, specs);
     return;
   }
 

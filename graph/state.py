@@ -243,6 +243,14 @@ class AgentState(TypedDict):
         list[ReasoningEntry], operator.add
     ]  # append-only trace
 
+    # ── Specs review gate (system/product scopes) ────────────────────
+    specs_approved: bool  # True once human explicitly approves specs
+    specs_revision_feedback: str  # feedback from human review (if revised)
+    awaiting_specs_approval: bool  # True while pipeline is paused for specs review
+
+    # ── Senior prompt queue (human injects instructions between iterations) ─
+    senior_prompt_queue: list[str]  # queued instructions from human; consumed per iteration
+
     # ── Learning mode ────────────────────────────────────────────
     learning_mode: bool  # True → run Stripper after DevOps
     golden_files: list[CodeFile]  # complete solution (hidden from junior)

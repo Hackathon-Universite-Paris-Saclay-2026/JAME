@@ -431,8 +431,72 @@ def architect_node(state: AgentState) -> dict:
             approved = True
             break
 
-        # API mode: auto-approve after self-critique passes
+        # API mode: request specs approval for system/product scopes when
+        # a clarification_callback is available (i.e. a WebSocket client is
+        # connected).  Simple scopes auto-approve as before.
         if not interactive:
+            _specs_review_callback = state.get("clarification_callback")
+            _mode = state.get("mode", "senior")
+            _needs_review = (
+                scope in ("system", "product")
+                and _mode in ("senior",)
+                and _specs_review_callback is not None
+            )
+            if _needs_review:
+                _log(
+                    {
+                        "agent": "architect",
+                        "phase": "specs_review",
+                        "content": "Waiting for specs approval before developer starts.",
+                    }
+                )
+                # Emit a special specs_review_request event — reuse the
+                # clarification_callback so we don't need a new callback type.
+                # The payload carries the full specs so the UI can render them.
+                _review_question = (
+                    "Please review the generated specifications. "
+                    "Reply 'approve' (or leave blank) to proceed, "
+                    "or describe changes you want."
+                )
+                answer = _specs_review_callback(
+                    _review_question,
+                    ["approve | Proceed to code generation as-is"],
+                )
+                answer = (answer or "").strip()
+                if answer.lower() in (
+                    "",
+                    "approve",
+                    "approved",
+                    "ok",
+                    "y",
+                    "yes",
+                ):
+                    approved = True
+                    _log(
+                        {
+                            "agent": "architect",
+                            "phase": "specs_review",
+                            "content": "Specs approved by user.",
+                        }
+                    )
+                    break
+                # Treat answer as revision feedback
+                feedback = answer
+                _log(
+                    {
+                        "agent": "architect",
+                        "phase": "specs_review",
+                        "content": f"Revision requested: {feedback}",
+                    }
+                )
+                memory = maybe_compress(
+                    llm,
+                    f"Revision feedback: {feedback}",
+                    memory,
+                    MEMORY_COMPRESS_PROMPT,
+                )
+                memory_section = f"## Memory / previous context\n{memory}\n\n"
+                continue
             approved = True
             _log(
                 {
@@ -492,5 +556,8 @@ def architect_node(state: AgentState) -> dict:
         "scope": scope,
         "specs": specs,
         "diagrams": diagrams,
+        "specs_approved": approved,
+        "specs_revision_feedback": feedback or "",
+        "awaiting_specs_approval": False,
         "reasoning_logs": reasoning_logs,
     }

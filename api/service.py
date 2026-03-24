@@ -103,6 +103,29 @@ class OrchestratorService:
 
         return result
 
+    async def queue_senior_prompt(self, run_id: str, prompt: str) -> bool:
+        """Append an instruction to the senior prompt queue for the given run.
+
+        Returns True if the run exists, False otherwise. The queued instruction
+        will be consumed by the developer node on its next iteration.
+        """
+        record = self.store.get_run(run_id)
+        if record is None:
+            return False
+        state = record.result.get("state", {})
+        queue: list[str] = state.get("senior_prompt_queue", [])
+        queue.append(prompt)
+        state["senior_prompt_queue"] = queue
+        record.result["state"] = state
+        await self._emit(
+            run_id,
+            "prompt_queued",
+            "Instruction queued for next developer iteration.",
+            agent="developer",
+            payload={"prompt": prompt, "queue_length": len(queue)},
+        )
+        return True
+
     async def get_next_hint(self, run_id: str) -> str | None:
         """Unlock and return the next progressive hint.
 
@@ -136,6 +159,10 @@ class OrchestratorService:
         )
         return hint
 
+    # Sentinel prefix that architect_node uses to mark specs review questions
+    # so the service can emit a dedicated specs_review_request event.
+    _SPECS_REVIEW_PREFIX = "Please review the generated specifications."
+
     async def _request_clarification(
         self, run_id: str, question: str, options: list[str]
     ) -> str:
@@ -148,6 +175,37 @@ class OrchestratorService:
             agent="architect",
             phase="interrogation",
             payload={"question": question, "options": options},
+        )
+        try:
+            return await asyncio.wait_for(future, timeout=300.0)
+        except TimeoutError:
+            return ""
+
+    async def _request_specs_review(
+        self, run_id: str, question: str, options: list[str]
+    ) -> str:
+        """Emit a specs_review_request event and await the user's approve/revise answer (max 300s).
+
+        Uses the same clarification future mechanism as regular clarification so
+        the existing /runs/{run_id}/clarify endpoint can resolve it.
+        """
+        future = self.store.request_clarification(run_id)
+        # Fetch the current specs from run state to include in payload
+        record = self.store.get_run(run_id)
+        specs_content = ""
+        if record:
+            specs_content = record.result.get("state", {}).get("specs", "")
+        await self._emit(
+            run_id,
+            "specs_review_request",
+            question,
+            agent="architect",
+            phase="specs_review",
+            payload={
+                "question": question,
+                "options": options,
+                "specs": specs_content,
+            },
         )
         try:
             return await asyncio.wait_for(future, timeout=300.0)
@@ -210,9 +268,9 @@ class OrchestratorService:
     ) -> Callable[[str, list[str] | None], str]:
         """Return a sync callable that can be called from the graph worker thread.
 
-        When a WebSocket client is subscribed, emits a clarification_request event
-        and waits for the answer. Falls back to stdin when running interactively
-        with no WebSocket client connected (CLI mode).
+        When a WebSocket client is subscribed, emits a clarification_request (or
+        specs_review_request) event and waits for the answer. Falls back to stdin
+        when running interactively with no WebSocket client connected (CLI mode).
         """
         svc = self
 
@@ -220,9 +278,18 @@ class OrchestratorService:
             question: str, options: list[str] | None = None
         ) -> str:
             if svc.store.has_subscribers(run_id):
-                coro = svc._request_clarification(
-                    run_id, question, options or []
+                # Route specs review questions to the dedicated event type
+                is_specs_review = question.startswith(
+                    svc._SPECS_REVIEW_PREFIX
                 )
+                if is_specs_review:
+                    coro = svc._request_specs_review(
+                        run_id, question, options or []
+                    )
+                else:
+                    coro = svc._request_clarification(
+                        run_id, question, options or []
+                    )
                 future = asyncio.run_coroutine_threadsafe(coro, loop)
                 try:
                     return future.result(timeout=305.0)
@@ -348,6 +415,12 @@ class OrchestratorService:
             "emit_callback": emit_fn,
             "tool_call_callback": tool_call_fn,
             "reasoning_logs": [],
+            # Specs review gate fields
+            "specs_approved": False,
+            "specs_revision_feedback": "",
+            "awaiting_specs_approval": False,
+            # Senior prompt queue
+            "senior_prompt_queue": [],
             # Learning mode fields
             "learning_mode": request.learning_mode,
             "golden_files": [],

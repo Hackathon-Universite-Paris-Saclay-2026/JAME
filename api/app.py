@@ -11,9 +11,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from .models import (
     ClarifyRequest,
     ExerciseResponse,
+    QueuePromptRequest,
     RunCreateRequest,
     RunCreateResponse,
     RunStatusResponse,
+    SpecsReviewRequest,
     SubmitRequest,
     SubmitResponse,
     ToolResponseRequest,
@@ -135,6 +137,48 @@ async def cancel_run(run_id: str) -> dict[str, str]:
             status_code=409, detail="Run is not in a cancellable state."
         )
     return {"status": "cancellation_requested"}
+
+
+@app.post("/runs/{run_id}/approve-specs")
+async def approve_specs(run_id: str, request: SpecsReviewRequest) -> dict[str, str]:
+    """Approve or request revision of the architect's generated specifications.
+
+    When action='approve' the pipeline resumes. When action='revise' the feedback
+    is submitted as the clarification answer so the architect revises the specs.
+    """
+    record = service.store.get_run(run_id)
+    if record is None:
+        raise HTTPException(
+            status_code=404, detail=f"Run '{run_id}' not found."
+        )
+    answer = "approve" if request.action == "approve" else (request.feedback or "revise")
+    resolved = service.store.submit_clarification(run_id, answer)
+    if not resolved:
+        raise HTTPException(
+            status_code=409, detail="No pending specs review for this run."
+        )
+    return {"status": f"specs_{request.action}d", "action": request.action}
+
+
+@app.post("/runs/{run_id}/queue-prompt")
+async def queue_prompt(run_id: str, request: QueuePromptRequest) -> dict[str, str]:
+    """Inject an instruction into the senior developer's prompt queue.
+
+    The queued prompt will be consumed on the next developer iteration.
+    Only meaningful in senior mode runs.
+    """
+    record = service.store.get_run(run_id)
+    if record is None:
+        raise HTTPException(
+            status_code=404, detail=f"Run '{run_id}' not found."
+        )
+    result = await service.queue_senior_prompt(run_id, request.prompt)
+    if not result:
+        raise HTTPException(
+            status_code=409,
+            detail="Run not found or not in a state that accepts queued prompts.",
+        )
+    return {"status": "prompt_queued"}
 
 
 @app.get("/runs/{run_id}/exercise", response_model=ExerciseResponse)

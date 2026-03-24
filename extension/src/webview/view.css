@@ -895,3 +895,73 @@ textarea:disabled { opacity: 0.5; cursor: not-allowed; }
   to   { opacity: 1; transform: translateY(0); }
 }
 .fade-in { animation: fadeSlideIn 0.25s ease forwards; }
+
+/* ── Specs Review Card ────────────────────────────────────────────────── */
+.specs-review-card {
+  margin: 8px 12px;
+  padding: 12px 14px;
+  background: #1a2744;
+  border: 1px solid #2a4a8a;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.specs-review-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #6db3f2;
+}
+
+.specs-review-icon { font-size: 14px; }
+.specs-review-title { letter-spacing: 0.03em; }
+
+.specs-review-question {
+  font-size: 12px;
+  color: #c9d1d9;
+  line-height: 1.5;
+}
+
+.specs-review-details {
+  border: 1px solid #2a4a8a;
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+.specs-review-summary {
+  padding: 5px 10px;
+  font-size: 11px;
+  color: #6db3f2;
+  cursor: pointer;
+  background: #0d1f40;
+  user-select: none;
+}
+
+.specs-review-summary:hover { background: #162a55; }
+
+.specs-review-content {
+  padding: 10px;
+  font-size: 11px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  color: #c9d1d9;
+  background: #0a1628;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.specs-review-feedback-row {
+  display: flex;
+  flex-direction: column;
+}
+
+.specs-review-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
