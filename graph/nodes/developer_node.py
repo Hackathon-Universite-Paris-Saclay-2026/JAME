@@ -44,6 +44,7 @@ from graph.state import (
     _sanitize_path,
 )
 from integrations.cortex import get_cortex_llm
+from utils.node import strip_thinking
 
 
 # ---------------------------------------------------------------------------
@@ -323,12 +324,15 @@ def _invoke_llm(
                 f"Structured failed ({type(e).__name__}), trying raw …",
             )
         else:
-            return result.content
+            _, content = strip_thinking(result.content)
+            return content
     try:
-        return llm.invoke(messages).content
+        _, content = strip_thinking(llm.invoke(messages).content)
     except Exception as e:
         _log("high", phase, f"LLM call failed ({type(e).__name__})")
-    return None
+        return None
+    else:
+        return content
 
 
 # ---------------------------------------------------------------------------

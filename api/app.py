@@ -16,6 +16,7 @@ from .models import (
     RunStatusResponse,
     SubmitRequest,
     SubmitResponse,
+    ToolResponseRequest,
 )
 from .service import OrchestratorService
 
@@ -93,6 +94,31 @@ async def clarify_run(run_id: str, request: ClarifyRequest) -> dict[str, str]:
             status_code=409, detail="No pending clarification for this run."
         )
     return {"status": "clarification_received"}
+
+
+@app.post("/runs/{run_id}/tool-response")
+async def tool_response(
+    run_id: str, request: ToolResponseRequest
+) -> dict[str, str]:
+    """Submit a run/skip decision for a pending tool_call event.
+
+    The QA node blocks until this endpoint is called with the tool_call_id
+    that was included in the tool_call WebSocket event payload.
+    """
+    record = service.store.get_run(run_id)
+    if record is None:
+        raise HTTPException(
+            status_code=404, detail=f"Run '{run_id}' not found."
+        )
+    resolved = service.store.submit_tool_response(
+        request.tool_call_id, request.action
+    )
+    if not resolved:
+        raise HTTPException(
+            status_code=409,
+            detail="No pending tool_call with that id for this run.",
+        )
+    return {"status": "tool_response_received", "action": request.action}
 
 
 @app.post("/runs/{run_id}/cancel")

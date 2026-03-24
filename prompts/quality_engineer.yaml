@@ -58,6 +58,9 @@ review:
     {content}
     ```
 
+    Tool check results (ruff / pytest — authoritative, trust these):
+    {tool_output}
+
     Perform a thorough static review covering:
 
     Correctness:
@@ -146,7 +149,10 @@ fix:
     You are the **Quality Engineer Agent** preparing fix instructions for the
     Developer Agent in the AI-DLC CONSTRUCTION phase.
 
-    Issues found in {file_path}:
+    Tool check results (ruff / pytest — authoritative, must be fixed):
+    {tool_output}
+
+    Static analysis issues found in {file_path}:
     {issues}
 
     Current file content:
