@@ -31,7 +31,6 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
-import tempfile
 import uuid
 
 from langchain_core.language_models import BaseChatModel
@@ -122,9 +121,7 @@ def _format_tool_output(tool_issues: list[QAIssue]) -> str:
     """Render tool issues as a readable block for prompt injection."""
     if not tool_issues:
         return "No tool issues found."
-    return "\n".join(
-        f"- [{i.severity}] {i.description}" for i in tool_issues
-    )
+    return "\n".join(f"- [{i.severity}] {i.description}" for i in tool_issues)
 
 
 def _analyse_file(
@@ -352,7 +349,7 @@ def _collect_qa_issues(
 # ── Tool-based checks ─────────────────────────────────────────────────────────
 
 
-class ToolSkipped(Exception):
+class ToolSkippedError(Exception):
     """Raised when the user chooses to skip a tool — QA stops immediately."""
 
 
@@ -382,7 +379,7 @@ def _run_tool_checks(
 
     For each tool the user is asked Run / Skip before execution:
     - Run  → execute; failures become QAIssue entries.
-    - Skip → raises ToolSkipped, QA stops immediately with FAIL.
+    - Skip → raises ToolSkippedError, QA stops immediately with FAIL.
 
     Returns a (possibly empty) list of QAIssue detected by the tools.
     If both tools pass the list is empty and the caller can short-circuit to PASS.
@@ -409,10 +406,10 @@ def _run_tool_checks(
     print(f"\n[TOOL] ruff check {project_dir}")
     action = _ask_tool(tool_call_fn, ruff_id, "ruff", ruff_bin, ruff_args)
     if action == "skip":
-        raise ToolSkipped("ruff")
+        raise ToolSkippedError("ruff")
 
     log({"agent": "qa", "phase": "act", "content": "Running ruff…"})
-    result = subprocess.run(
+    result = subprocess.run(  # noqa: S603
         [ruff_bin, *ruff_args],
         capture_output=True,
         text=True,
@@ -446,7 +443,7 @@ def _run_tool_checks(
                     QAIssue(
                         file=d.get("filename", "UNKNOWN"),
                         severity="major",
-                        description=f"[ruff] {d.get('code','?')} line {line}: {d.get('message','')}",
+                        description=f"[ruff] {d.get('code', '?')} line {line}: {d.get('message', '')}",
                     )
                 )
         else:
@@ -468,12 +465,14 @@ def _run_tool_checks(
     pytest_id = str(uuid.uuid4())
 
     print(f"\n[TOOL] pytest {project_dir}")
-    action = _ask_tool(tool_call_fn, pytest_id, "pytest", pytest_bin, pytest_args)
+    action = _ask_tool(
+        tool_call_fn, pytest_id, "pytest", pytest_bin, pytest_args
+    )
     if action == "skip":
-        raise ToolSkipped("pytest")
+        raise ToolSkippedError("pytest")
 
     log({"agent": "qa", "phase": "act", "content": "Running pytest…"})
-    result = subprocess.run(
+    result = subprocess.run(  # noqa: S603
         [pytest_bin, *pytest_args],
         capture_output=True,
         text=True,
@@ -610,8 +609,10 @@ def qa_node(state: AgentState) -> dict:
             tool_issues = _run_tool_checks(
                 code_files, project_dir, tool_call_fn, _log
             )
-        except ToolSkipped as exc:
-            print(f"\n[AI-DLC] Tool '{exc}' skipped by user — stopping QA with FAIL.\n")
+        except ToolSkippedError as exc:
+            print(
+                f"\n[AI-DLC] Tool '{exc}' skipped by user — stopping QA with FAIL.\n"
+            )
             _log(
                 {
                     "agent": "qa",
@@ -761,7 +762,9 @@ def qa_node(state: AgentState) -> dict:
         if code_file is not None:
             files_to_fix.append((result, code_file))
 
-    print(f"[FIX] Generating fix instructions for {len(files_to_fix)} file(s) …")
+    print(
+        f"[FIX] Generating fix instructions for {len(files_to_fix)} file(s) …"
+    )
     _log(
         {
             "agent": "qa",

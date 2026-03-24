@@ -184,7 +184,7 @@ class OrchestratorService:
 
     def _make_tool_call_fn(
         self, run_id: str, loop: asyncio.AbstractEventLoop
-    ) -> "Callable[[str, str, str, list[str]], str]":
+    ) -> Callable[[str, str, str, list[str]], str]:
         """Return a sync callable that emits a tool_call event and blocks for run/skip."""
         svc = self
 
@@ -260,7 +260,6 @@ class OrchestratorService:
             asyncio.run_coroutine_threadsafe(coro, loop)
 
         return _emit_sync
-
 
     async def _emit(
         self,

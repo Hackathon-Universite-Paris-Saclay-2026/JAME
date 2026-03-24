@@ -23,7 +23,6 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from cancel_token import raise_if_cancelled
-from utils.node import strip_thinking
 from graph.prompts.developer_prompts import (
     COMPONENT_HINT,
     FILE_CONTEXT,
@@ -45,6 +44,7 @@ from graph.state import (
     _sanitize_path,
 )
 from integrations.cortex import get_cortex_llm
+from utils.node import strip_thinking
 
 
 # ---------------------------------------------------------------------------
@@ -328,10 +328,11 @@ def _invoke_llm(
             return content
     try:
         _, content = strip_thinking(llm.invoke(messages).content)
-        return content
     except Exception as e:
         _log("high", phase, f"LLM call failed ({type(e).__name__})")
-    return None
+        return None
+    else:
+        return content
 
 
 # ---------------------------------------------------------------------------

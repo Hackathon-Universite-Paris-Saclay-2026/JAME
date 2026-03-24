@@ -97,7 +97,9 @@ async def clarify_run(run_id: str, request: ClarifyRequest) -> dict[str, str]:
 
 
 @app.post("/runs/{run_id}/tool-response")
-async def tool_response(run_id: str, request: ToolResponseRequest) -> dict[str, str]:
+async def tool_response(
+    run_id: str, request: ToolResponseRequest
+) -> dict[str, str]:
     """Submit a run/skip decision for a pending tool_call event.
 
     The QA node blocks until this endpoint is called with the tool_call_id
