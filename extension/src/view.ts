@@ -15,6 +15,8 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
   private currentRunId?: string;
   /** Actual backend URL after port resolution (may differ from configured URL). */
   private resolvedBackendUrl?: string;
+  /** Backend instance ID from /health — changes on every restart. */
+  private knownInstanceId?: string;
   /** Proposed file contents keyed by relative path, for inline diff editor. */
   private proposedFiles: Map<string, string> = new Map();
   /** Generated file contents keyed by relative path, from the most recent run. */
@@ -57,31 +59,28 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
     const hadExisting = fs.existsSync(destPath);
     const previousContent = hadExisting ? fs.readFileSync(destPath, "utf8") : null;
 
-    // Write immediately so the file is on disk (not lost if VS Code crashes)
+    // Write immediately so the file is on disk before the diff editor opens.
     fs.mkdirSync(path.dirname(destPath), { recursive: true });
     fs.writeFileSync(destPath, content, "utf8");
 
-    // Open a diff editor showing what changed (previous ↔ new, or empty ↔ new)
-    const proposedUri = vscode.Uri.parse(`jame-proposed:${filePath}`);
+    // Open the diff editor asynchronously (fire-and-forget) so streaming of
+    // subsequent file_generated events is not blocked waiting for the editor.
     const label = `${path.basename(filePath)} (JAME generated)`;
-
     if (hadExisting && previousContent !== null) {
-      // Store the old content under a "previous" key so the diff LHS shows it
       this.proposedFiles.set(`__prev__${filePath}`, previousContent);
-      await vscode.commands.executeCommand(
+      vscode.commands.executeCommand(
         "vscode.diff",
         vscode.Uri.parse(`jame-proposed:__prev__${filePath}`),
         vscode.Uri.file(destPath),
         label
-      );
+      ).then(undefined, () => {/* ignore if tab can't open */});
     } else {
-      // New file — diff against empty to show what was added
-      await vscode.commands.executeCommand(
+      vscode.commands.executeCommand(
         "vscode.diff",
         vscode.Uri.parse("jame-proposed:__empty__"),
         vscode.Uri.file(destPath),
         label
-      );
+      ).then(undefined, () => {/* ignore if tab can't open */});
     }
   }
 
@@ -161,6 +160,23 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
 
       if (msg.command === "openProposedChange") {
         await this.openProposedChange(msg.filePath!, msg.fileContent!);
+        return;
+      }
+
+      if (msg.command === "openExerciseFile") {
+        // Write the stub to disk and open it for editing (no diff — junior edits the stub directly)
+        const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (workspaceRoot && msg.filePath && msg.fileContent !== undefined) {
+          const destPath = path.join(workspaceRoot, msg.filePath);
+          fs.mkdirSync(path.dirname(destPath), { recursive: true });
+          if (!fs.existsSync(destPath)) {
+            // Only write on first open — don't overwrite edits the junior already made
+            fs.writeFileSync(destPath, msg.fileContent, "utf8");
+          }
+          this.generatedFiles.set(msg.filePath, msg.fileContent);
+          const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(destPath));
+          await vscode.window.showTextDocument(doc, { preview: false });
+        }
         return;
       }
 
@@ -587,6 +603,12 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
 
   private async ensureBackendReady(backendUrl: string): Promise<void> {
     if (await this.isBackendHealthy(backendUrl)) {
+      // Fetch instance_id to detect backend restarts
+      const instanceId = await this.fetchInstanceId(backendUrl);
+      const isNewInstance = instanceId && instanceId !== this.knownInstanceId;
+      if (instanceId) {
+        this.knownInstanceId = instanceId;
+      }
       if (!this.resolvedBackendUrl) {
         this.resolvedBackendUrl = backendUrl;
         this.view?.webview.postMessage({ command: "backendUrlResolved", backendUrl });
@@ -594,6 +616,10 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
         this.outputChannel.appendLine(`[JAME] Backend already running at ${backendUrl} (externally managed).`);
         this.outputChannel.appendLine(`[JAME] Logs are in the terminal where you started the backend.`);
         this.outputChannel.appendLine(`[JAME] To see logs here, let the extension manage the backend (stop your manual process).`);
+      }
+      // Backend restarted (new instance) — clear the webview chat
+      if (isNewInstance) {
+        this.view?.webview.postMessage({ command: "clearChat" });
       }
       return;
     }
@@ -694,6 +720,9 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
 
     while (Date.now() - startedAt < timeoutMs) {
       if (await this.isBackendHealthy(backendUrl)) {
+        // Capture instance_id on first healthy response after our own launch
+        const instanceId = await this.fetchInstanceId(backendUrl);
+        if (instanceId) { this.knownInstanceId = instanceId; }
         this.view?.webview.postMessage({ command: "system", message: "Backend ready." });
         return;
       }
@@ -718,6 +747,19 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
     throw new Error(
       `Backend did not become ready in time (${timeoutMs / 1000}s).${snippet ? "\n" + snippet : ""}`
     );
+  }
+
+  private async fetchInstanceId(backendUrl: string): Promise<string | undefined> {
+    const fetchFn = (globalThis as { fetch?: (input: string, init?: unknown) => Promise<any> }).fetch;
+    if (!fetchFn) { return undefined; }
+    try {
+      const resp = await fetchFn(`${backendUrl}/health`);
+      if (!resp.ok) { return undefined; }
+      const body = await resp.json();
+      return body?.instance_id as string | undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   private async isBackendHealthy(backendUrl: string): Promise<boolean> {

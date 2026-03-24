@@ -287,6 +287,22 @@ body {
 .fp-undo { color: #f48771; }
 .fp-row.fp-kept    { opacity: 0.55; }
 .fp-row.fp-discarded { opacity: 0.35; text-decoration: line-through; }
+.fp-row-exercise { cursor: pointer; }
+.fp-row-exercise .fp-name { color: var(--vscode-foreground, #ccc); }
+.fp-row-exercise:hover { background: rgba(255,255,255,.04); }
+.fp-row-exercise:hover .fp-name { text-decoration: underline; color: var(--vscode-textLink-foreground, #4fc3f7); }
+.fp-stub-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .03em;
+  color: #1a1a2e;
+  background: #4fc3f7;
+  border-radius: 3px;
+  padding: 1px 6px;
+  flex-shrink: 0;
+}
 .fp-verdict {
   padding: 4px 12px; font-size: 11px; font-weight: 500;
   border-top: 1px solid #2d2d30;

@@ -374,6 +374,9 @@ function resetFilesPanel() {
 }
 
 function addFileToPanel(relPath, content) {
+  // Skip files the user already decided on (keep/undo) — prevents late-arriving
+  // file_generated events from re-opening the panel after Keep All / Undo All.
+  if (fpDecided.has(relPath)) return;
   const lines = content ? content.split('\n').length : 0;
   fpFiles[relPath] = lines;
 
@@ -414,6 +417,44 @@ function addFileToPanel(relPath, content) {
     row.remove();
     updateFilesPanelSummary();
     if (Object.keys(fpFiles).length === 0) filesPanel.classList.remove('visible');
+  });
+
+  filesPanelBody.appendChild(row);
+  updateFilesPanelSummary();
+  filesPanel.classList.add('visible');
+}
+
+// Junior mode variant: shows a locked placeholder row — no content visible,
+// no open-diff action, no keep/undo (the file is the exercise stub to implement).
+// exerciseFileContents: relPath → stub content (for opening on click)
+const exerciseFileContents = {};
+
+function addFileToPanelExercise(relPath, content) {
+  if (fpDecided.has(relPath)) return;
+  fpFiles[relPath] = 0;
+  exerciseFileContents[relPath] = content || '';
+
+  const existing = filesPanelBody.querySelector('[data-path="' + CSS.escape(relPath) + '"]');
+  if (existing) existing.remove();
+
+  const ext = (relPath.split('.').pop() || 'file').toLowerCase();
+  const name = relPath.split('/').pop() || relPath;
+
+  const row = document.createElement('div');
+  row.className = 'fp-row fp-row-exercise';
+  row.dataset.path = relPath;
+  row.title = 'Click to open — implement the TODO stubs in this file';
+  row.innerHTML =
+    '<span class="fp-ext">' + escHtml(ext) + '</span>' +
+    '<span class="fp-name" title="' + escHtml(relPath) + '">' + escHtml(name) + '</span>' +
+    '<span class="fp-stub-badge">stub</span>';
+
+  row.addEventListener('click', function() {
+    vscode.postMessage({
+      command: 'openExerciseFile',
+      filePath: relPath,
+      fileContent: exerciseFileContents[relPath] || '',
+    });
   });
 
   filesPanelBody.appendChild(row);
@@ -1234,12 +1275,8 @@ function showIterationReviewCard(question) {
 function send() {
   const text = inputEl.value.trim();
   const slashCmd = activeSlashCmd;
-  if (!text && !slashCmd) {
-    if (isRunning && currentRunId) {
-      stop();
-    }
-    return;
-  }
+  // Empty input while running: do nothing (stop is on the stop button, not send)
+  if (!text && !slashCmd) return;
 
   const mode = currentMode;
   const displayText = slashCmd ? slashCmd + (text ? ' ' + text : '') : text;
@@ -1555,6 +1592,14 @@ window.addEventListener('message', async (event) => {
     return;
   }
 
+  if (msg.command === 'clearChat') {
+    // Backend restarted (new instance_id) — clear stale session state
+    if (!isRunning) {
+      doNewChat();
+    }
+    return;
+  }
+
   if (msg.command === 'runCreated') {
     currentRunId = msg.runId;
     addSysMsg('Run started [' + msg.runId.substring(0, 8) + ']', 'info');
@@ -1704,9 +1749,19 @@ function handleServerEvent(data) {
   if (event === 'file_generated') {
     const p = data.payload;
     if (p && p.path) {
-      vscode.postMessage({ command: 'openProposedChange', filePath: p.path, fileContent: p.content || '' });
-      addFileToPanel(p.path, p.content || '');
-      generatedFiles.push(p.path);
+      if (currentMode === 'junior') {
+        // Junior mode: only show files produced by the exercise packager (after stripping).
+        // Developer node files are hidden — the junior sees only the stub version.
+        if (data.agent === 'exercise_generator') {
+          generatedFiles.push(p.path);
+          addFileToPanelExercise(p.path, p.content || '');
+        }
+        // else: silently ignore developer-node file events in junior mode
+      } else {
+        generatedFiles.push(p.path);
+        vscode.postMessage({ command: 'openProposedChange', filePath: p.path, fileContent: p.content || '' });
+        addFileToPanel(p.path, p.content || '');
+      }
     }
     return;
   }

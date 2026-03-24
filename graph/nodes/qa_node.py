@@ -416,6 +416,104 @@ def _ruff_code_is_blocking(code: str) -> bool:
     return False
 
 
+def _ruff_autofix(
+    project_dir: Path,
+    code_files: list[CodeFile],
+    log: Callable[[dict], None],
+) -> None:
+    """Run ``ruff check --fix --unsafe-fixes`` then suppress remaining unfixable style codes.
+
+    Two-pass approach:
+      Pass 1 — ``ruff --fix --unsafe-fixes``: apply all auto-correctable fixes in-place.
+      Pass 2 — parse remaining JSON diagnostics; for any unfixable *style-only* code
+               (non-blocking per ``_ruff_code_is_blocking``), inject a ``# noqa: CODE``
+               inline comment on the offending line so the next ruff run passes cleanly.
+
+    Updates in-memory ``code_files`` after both passes.
+    """
+    ruff_bin = shutil.which("ruff") or sys.executable.replace("python", "ruff")
+    if not ruff_bin:
+        return
+
+    # Pass 1: auto-fix
+    subprocess.run(  # noqa: S603
+        [ruff_bin, "check", "--fix", "--unsafe-fixes", str(project_dir)],
+        capture_output=True,
+        text=True,
+        cwd=str(project_dir),
+    )
+
+    # Pass 2: suppress unfixable style-only violations with inline # noqa comments
+    check_result = subprocess.run(  # noqa: S603
+        [ruff_bin, "check", "--output-format=json", str(project_dir)],
+        capture_output=True,
+        text=True,
+        cwd=str(project_dir),
+    )
+    remaining_suppressed = 0
+    if check_result.returncode != 0 and check_result.stdout.strip():
+        try:
+            diagnostics = json.loads(check_result.stdout)
+        except json.JSONDecodeError:
+            diagnostics = []
+
+        # Group style-only (non-blocking) violations by file+line
+        noqa_by_file: dict[str, dict[int, set[str]]] = {}
+        for d in diagnostics:
+            code = d.get("code", "")
+            if not code or _ruff_code_is_blocking(code):
+                continue  # leave blocking issues for the LLM to fix
+            if d.get("fix") is not None:
+                continue  # already fixable — ruff --fix should have caught it
+            fname = d.get("filename", "")
+            line = d.get("location", {}).get("row", 1)
+            noqa_by_file.setdefault(fname, {}).setdefault(line, set()).add(code)
+
+        # Inject # noqa: CODE comments into the files
+        for abs_path, line_codes in noqa_by_file.items():
+            dest = Path(abs_path)
+            if not dest.exists():
+                continue
+            lines = dest.read_text(encoding="utf-8").splitlines(keepends=True)
+            for line_no in sorted(line_codes.keys(), reverse=True):
+                idx = line_no - 1  # ruff rows are 1-based
+                if 0 <= idx < len(lines):
+                    codes_str = ", ".join(sorted(line_codes[line_no]))
+                    stripped = lines[idx].rstrip("\n").rstrip("\r")
+                    eol = lines[idx][len(stripped):]
+                    if "# noqa" in stripped:
+                        # Append codes to existing noqa comment
+                        stripped = stripped + ", " + codes_str
+                    else:
+                        stripped = stripped + f"  # noqa: {codes_str}"
+                    lines[idx] = stripped + eol
+                    remaining_suppressed += len(line_codes[line_no])
+            dest.write_text("".join(lines), encoding="utf-8")
+
+    # Reload corrected content into code_files
+    for cf in code_files:
+        dest = project_dir / cf.path
+        if dest.exists():
+            cf.content = dest.read_text(encoding="utf-8")
+
+    if remaining_suppressed:
+        log(
+            {
+                "agent": "qa",
+                "phase": "act",
+                "content": f"ruff: {remaining_suppressed} unfixable style violation(s) suppressed with # noqa.",
+            }
+        )
+    else:
+        log(
+            {
+                "agent": "qa",
+                "phase": "act",
+                "content": "ruff --fix applied; no residual style violations.",
+            }
+        )
+
+
 def _run_tool_checks(
     code_files: list[CodeFile],
     project_dir: Path,
@@ -658,8 +756,15 @@ def qa_node(state: AgentState) -> dict:
     tool_call_fn = state.get("tool_call_callback")
     tool_issues: list[QAIssue] = []
 
+    scope = state.get("scope", "system")
+    is_lightweight = scope in ("function", "feature")
+
     if run_output_dir:
         project_dir = Path(run_output_dir) / "output" / "project"
+
+        # ── Auto-fix style issues with ruff --fix before checking ────────────
+        _ruff_autofix(project_dir, code_files, _log)
+
         try:
             tool_issues = _run_tool_checks(
                 code_files, project_dir, tool_call_fn, _log
@@ -701,7 +806,56 @@ def qa_node(state: AgentState) -> dict:
                 "reasoning_logs": reasoning_logs,
             }
 
-        # Tool failures found — feed them into the LLM review as pre-seeded issues
+        # For lightweight scopes: NEVER run LLM review — tools are authoritative.
+        # Pass if no blocking issues remain; fail with exact tool output so the
+        # developer gets precise line-level feedback instead of LLM hallucinations.
+        if is_lightweight:
+            blocking = [i for i in tool_issues if i.severity != "minor"]
+            pytest_issues = [i for i in tool_issues if "[pytest]" in i.description]
+            if not blocking and not pytest_issues:
+                print(
+                    "\n[AI-DLC] Lightweight scope — style warnings only. PASS.\n"
+                )
+                _log(
+                    {
+                        "agent": "qa",
+                        "phase": "reason",
+                        "content": "Lightweight scope: style-only ruff warnings, pytest passed. AI-DLC QA decision: PASS.",
+                    }
+                )
+                return {
+                    "qa_passed": True,
+                    "qa_feedback": "",
+                    "qa_issues": [i.model_dump() for i in tool_issues],
+                    "iteration": iteration + 1,
+                    "reasoning_logs": reasoning_logs,
+                }
+            # Fail with exact tool diagnostics — no LLM involved
+            feedback_lines = [i.description for i in blocking + pytest_issues]
+            qa_feedback = (
+                "Fix the following specific issues (do NOT change other code):\n"
+                + "\n".join(f"- {d}" for d in feedback_lines)
+            )
+            print(
+                f"\n[AI-DLC] Lightweight scope — {len(blocking + pytest_issues)} blocking issue(s). "
+                "Returning exact tool feedback to Developer (no LLM review).\n"
+            )
+            _log(
+                {
+                    "agent": "qa",
+                    "phase": "reason",
+                    "content": f"Lightweight scope: {len(blocking + pytest_issues)} blocking issue(s) — exact tool feedback dispatched.",
+                }
+            )
+            return {
+                "qa_passed": False,
+                "qa_feedback": qa_feedback,
+                "qa_issues": [i.model_dump() for i in tool_issues],
+                "iteration": iteration + 1,
+                "reasoning_logs": reasoning_logs,
+            }
+
+        # Non-lightweight: tool failures found — feed them into the LLM review
         print(
             f"\n[AI-DLC] Tool checks found {len(tool_issues)} issue(s) — continuing with LLM review.\n"
         )

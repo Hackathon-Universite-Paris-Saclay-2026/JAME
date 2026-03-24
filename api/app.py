@@ -44,10 +44,14 @@ app.add_middleware(
 service = OrchestratorService(output_root=Path("runs"))
 
 
+import uuid as _uuid
+_INSTANCE_ID = str(_uuid.uuid4())
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     """Health check endpoint used by the VS Code extension to verify the backend is ready."""
-    return {"status": "ok"}
+    return {"status": "ok", "instance_id": _INSTANCE_ID}
 
 
 @app.post("/runs", status_code=202, response_model=RunCreateResponse)

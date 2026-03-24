@@ -18,6 +18,9 @@ Architecture enforced across all generated projects:
 from __future__ import annotations
 
 from pathlib import Path, PurePosixPath
+import shutil
+import subprocess
+import sys
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -825,6 +828,44 @@ def _run_lightweight(
 
 
 # ---------------------------------------------------------------------------
+# Ruff search/replace fix
+# ---------------------------------------------------------------------------
+
+
+def _apply_ruff_fixes(
+    project_dir: Path, code_files: list[dict]
+) -> tuple[list[dict], bool]:
+    """Run ``ruff check --fix --unsafe-fixes`` on *project_dir* and reload content.
+
+    Returns ``(updated_code_files, any_fix_applied)``.  Only the files that
+    changed on disk are updated; unchanged files are returned as-is.
+    """
+    ruff_bin = shutil.which("ruff") or sys.executable.replace("python", "ruff")
+    if not ruff_bin or not project_dir.exists():
+        return code_files, False
+
+    result = subprocess.run(  # noqa: S603
+        [ruff_bin, "check", "--fix", "--unsafe-fixes", str(project_dir)],
+        capture_output=True,
+        text=True,
+        cwd=str(project_dir),
+    )
+    fixed = result.returncode == 0 or "Fixed" in (result.stdout + result.stderr)
+    if not fixed:
+        return code_files, False
+
+    updated: list[dict] = []
+    for f in code_files:
+        dest = project_dir / f["path"]
+        if dest.exists():
+            new_content = dest.read_text(encoding="utf-8")
+            if new_content != f.get("content", ""):
+                f = {**f, "content": new_content}
+        updated.append(f)
+    return updated, True
+
+
+# ---------------------------------------------------------------------------
 # Main node
 # ---------------------------------------------------------------------------
 
@@ -891,6 +932,95 @@ def developer_node(state: AgentState) -> dict:
     )
 
     # ── Lightweight path: function / feature scope ───────────────
+    if scope in LIGHTWEIGHT_SCOPES and iteration > 0:
+        # Retry after QA failure.
+        # Step 1: apply ruff --fix in-place (no LLM).
+        # Step 2: if blocking issues remain, regenerate only the flagged files
+        #         using the lightweight generator with exact error context.
+        # Never runs the full 4-phase pipeline for lightweight scopes.
+        _lw_run_output_dir = state.get("run_output_dir", "")
+        _lw_project_dir: Path | None = None
+        if _lw_run_output_dir:
+            _lw_project_dir = (
+                Path(_lw_run_output_dir) / "output" / "project"
+            ).resolve()
+        _existing_files_raw = list(state.get("code_files", []))
+        _existing_dicts = [
+            f if isinstance(f, dict) else f.model_dump()
+            for f in _existing_files_raw
+        ]
+
+        # Step 1 — ruff fix
+        if _lw_project_dir and _existing_dicts:
+            print("\n[ACT]  Lightweight retry — applying ruff fixes …")
+            _fixed_files, _any_fixed = _apply_ruff_fixes(
+                _lw_project_dir, _existing_dicts
+            )
+            if _any_fixed:
+                _existing_dicts = _fixed_files
+
+        # Step 2 — targeted LLM regeneration of flagged files only
+        # qa_feedback now contains exact tool lines ("- [pytest] FAILED ...")
+        if qa_feedback:
+            # Determine which files need regeneration from the feedback
+            _flagged: list[str] = []
+            for _fd in _existing_dicts:
+                _p = _fd.get("path", "")
+                if _p in qa_feedback or _p.split("/")[-1] in qa_feedback:
+                    _flagged.append(_p)
+            # If nothing matched explicitly, flag test files (pytest failures)
+            if not _flagged and "[pytest]" in qa_feedback:
+                _flagged = [
+                    _fd["path"]
+                    for _fd in _existing_dicts
+                    if "test" in _fd.get("path", "").lower()
+                ]
+            # Regenerate only flagged files
+            _existing_map = {f["path"]: f for f in _existing_dicts}
+            gen_prompt = LIGHTWEIGHT_GENERATE_SYSTEM_PROMPT.format(scope=scope)
+            for _fpath in _flagged:
+                raise_if_cancelled()
+                print(f"\n[ACT]  Targeted fix: regenerating {_fpath} …")
+                _ctx = (
+                    f"## Specifications\n{augmented_specs}\n\n"
+                    f"## Exact errors to fix (change ONLY what is needed)\n{qa_feedback}\n\n"
+                    f"## File to regenerate\nPath: `{_fpath}`"
+                    + _resolve_all_generated(_existing_map)
+                )
+                _content = _invoke_llm(
+                    llm, gen_prompt, _ctx, schema=SingleFileContent, phase="ACT"
+                )
+                if _content:
+                    _content = _strip_markdown_fences(_content)
+                if _content and _content.strip():
+                    if _lw_project_dir:
+                        _dest = _lw_project_dir / _fpath
+                        _dest.parent.mkdir(parents=True, exist_ok=True)
+                        _dest.write_text(_content, encoding="utf-8")
+                    _existing_map[_fpath] = {
+                        "path": _fpath,
+                        "content": _content,
+                        "language": _detect_language(_fpath),
+                    }
+                    print(f"[ACT]    ✓ {len(_content)} chars")
+
+            _result_files = list(_existing_map.values())
+        else:
+            _result_files = _existing_dicts
+
+        reason = (
+            f"Lightweight retry: ruff fixed in-place, "
+            f"{len([f for f in _result_files])} file(s) ready."
+        )
+        print(f"\n[REASON] {reason}\n")
+        _log({"agent": "developer", "phase": "reason", "content": reason})
+        return {
+            "functional_design": state.get("functional_design", ""),
+            "code_files": _result_files,
+            "reasoning_logs": [],
+            "senior_prompt_queue": [],
+        }
+
     if scope in LIGHTWEIGHT_SCOPES and iteration == 0:
         print(
             f"\n\u26a1 Lightweight mode ({scope}) \u2014 skipping full-stack pipeline"

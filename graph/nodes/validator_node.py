@@ -95,8 +95,8 @@ def validate_submission(
     Args:
         submitted_files: Files submitted by the junior.
         golden_files: Original complete solution (hidden from junior until now).
-        learning_objectives: List of objectives produced by the Stripper node.
-        hints: Progressive hints list produced by the Stripper node.
+        learning_objectives: List of objectives produced by the Exercise Packager node.
+        hints: Progressive hints list produced by the Exercise Packager node.
         hint_level: Current number of hints already unlocked.
 
     Returns:
