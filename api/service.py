@@ -235,6 +235,11 @@ class OrchestratorService:
         # chunk_queue is created first so it can be registered for immediate cancel
         chunk_queue: asyncio.Queue = asyncio.Queue()
         self.store.register_token(run_id, token, chunk_queue)
+        # If cancel_run() was called before register_token (race condition),
+        # the run is already in the cancelled set — fire the token now.
+        if self.store.is_cancelled(run_id):
+            token.cancel()
+            chunk_queue.put_nowait(("cancelled", None))
 
         loop = asyncio.get_running_loop()
         clarify_fn = self._make_clarify_fn(run_id, loop)
