@@ -287,9 +287,15 @@ def architect_node(state: AgentState) -> dict:
     user_request = state["user_request"]
     memory = ""
     reasoning_logs: list[dict] = []
+    _emit = state.get("emit_callback")
+
+    def _log(entry: dict) -> None:
+        reasoning_logs.append(entry)
+        if _emit:
+            _emit(entry)
 
     print(f"\n[PLAN] Analysing: '{user_request}'")
-    reasoning_logs.append(
+    _log(
         {
             "agent": "architect",
             "phase": "plan",
@@ -299,7 +305,7 @@ def architect_node(state: AgentState) -> dict:
 
     # ── Step 1: Classify scope ───────────────────────────────────────────────
     scope, needs_interrogation = _classify_scope(llm, user_request)
-    reasoning_logs.append(
+    _log(
         {
             "agent": "architect",
             "phase": "classify",
@@ -314,7 +320,7 @@ def architect_node(state: AgentState) -> dict:
         clarifications = _interrogate_api(
             llm, user_request, MAX_INTERROGATION_ROUNDS, callback
         )
-        reasoning_logs.append(
+        _log(
             {
                 "agent": "architect",
                 "phase": "interrogation",
@@ -325,7 +331,7 @@ def architect_node(state: AgentState) -> dict:
         clarifications = _interrogate(
             llm, user_request, MAX_INTERROGATION_ROUNDS
         )
-        reasoning_logs.append(
+        _log(
             {
                 "agent": "architect",
                 "phase": "interrogation",
@@ -333,7 +339,7 @@ def architect_node(state: AgentState) -> dict:
             }
         )
     elif needs_interrogation:
-        reasoning_logs.append(
+        _log(
             {
                 "agent": "architect",
                 "phase": "interrogation",
@@ -398,7 +404,7 @@ def architect_node(state: AgentState) -> dict:
             )
 
         specs, diagrams = _parse_output(raw)
-        reasoning_logs.append(
+        _log(
             {
                 "agent": "architect",
                 "phase": "act",
@@ -409,7 +415,7 @@ def architect_node(state: AgentState) -> dict:
 
         # Self-critique
         critique_issues = _self_critique(llm, specs, diagrams)
-        reasoning_logs.append(
+        _log(
             {
                 "agent": "architect",
                 "phase": "self_critique",
@@ -427,7 +433,7 @@ def architect_node(state: AgentState) -> dict:
         # API mode: auto-approve after self-critique passes
         if not interactive:
             approved = True
-            reasoning_logs.append(
+            _log(
                 {
                     "agent": "architect",
                     "phase": "validate",
@@ -453,9 +459,7 @@ def architect_node(state: AgentState) -> dict:
 
     reason_trace = f"Final: {len(specs)}c specs, {len(diagrams)}c diagrams."
     print(f"[REASON] {reason_trace}\n")
-    reasoning_logs.append(
-        {"agent": "architect", "phase": "reason", "content": reason_trace}
-    )
+    _log({"agent": "architect", "phase": "reason", "content": reason_trace})
 
     run_output_dir = state.get("run_output_dir", "")
     if run_output_dir:

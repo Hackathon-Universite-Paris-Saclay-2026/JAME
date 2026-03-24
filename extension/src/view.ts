@@ -194,6 +194,16 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
         return;
       }
 
+      if (msg.command === "logEvent") {
+        this.outputChannel.appendLine(msg.line as string);
+        return;
+      }
+
+      if (msg.command === "clearLogs") {
+        this.outputChannel.clear();
+        return;
+      }
+
       if (msg.command !== "startRun") {
         return;
       }
@@ -476,6 +486,10 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
       if (!this.resolvedBackendUrl) {
         this.resolvedBackendUrl = backendUrl;
         this.view?.webview.postMessage({ command: "backendUrlResolved", backendUrl });
+        this.outputChannel.clear();
+        this.outputChannel.appendLine(`[JAME] Backend already running at ${backendUrl} (externally managed).`);
+        this.outputChannel.appendLine(`[JAME] Logs are in the terminal where you started the backend.`);
+        this.outputChannel.appendLine(`[JAME] To see logs here, let the extension manage the backend (stop your manual process).`);
       }
       return;
     }
@@ -538,11 +552,12 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
     this.outputChannel.appendLine(`[JAME] Starting backend on ${backendUrl}`);
     this.backendProcess = spawn(
       venvPython,
-      ["-m", "uvicorn", "api.app:app", "--host", "0.0.0.0", "--port", port],
+      ["-u", "-m", "uvicorn", "api.app:app", "--host", "0.0.0.0", "--port", port],
       {
         cwd: repoRoot,
         stdio: ["ignore", "pipe", "pipe"],
         detached: false,
+        env: { ...process.env, PYTHONUNBUFFERED: "1" },
       }
     );
 
@@ -1435,6 +1450,13 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
         <span id="modeBadgeLabel">Senior</span>
         <span class="mode-badge-lock" id="modeBadgeLock" style="display:none">&#128274;</span>
       </div>
+      <button class="new-chat-btn" id="showLogsBtn" title="Show backend logs in terminal">
+        <svg viewBox="0 0 16 16" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" fill="none">
+          <polyline points="2,4 6,8 2,12"/>
+          <line x1="8" y1="12" x2="14" y2="12"/>
+        </svg>
+        Logs
+      </button>
       <button class="new-chat-btn" id="newChatBtn" title="New chat — clear conversation">
         <svg viewBox="0 0 16 16" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
           <line x1="8" y1="2" x2="8" y2="14"/>
@@ -1529,6 +1551,7 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
     const filesPanelSummary = document.getElementById('filesPanelSummary');
     const fpKeepBtn    = document.getElementById('fpKeepBtn');
     const fpUndoBtn    = document.getElementById('fpUndoBtn');
+    const showLogsBtn       = document.getElementById('showLogsBtn');
     const newChatBtn        = document.getElementById('newChatBtn');
     const newChatConfirmEl  = document.getElementById('newChatConfirm');
     const newChatConfirmOk  = document.getElementById('newChatConfirmOk');
@@ -2071,6 +2094,7 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
 
     sendBtn.addEventListener('click', send);
     stopBtn.addEventListener('click', stop);
+    showLogsBtn.addEventListener('click', () => vscode.postMessage({ command: 'showLogs' }));
     newChatBtn.addEventListener('click', newChat);
 
     // ── Running state ─────────────────────────────────────────────
@@ -2794,7 +2818,20 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
 
       console.log('[JAME event]', event, rawAgent, data.message);
 
+      // Mirror all events to the VS Code output channel so users can see them
+      // even when the backend is externally managed (not spawned by the extension).
+      {
+        const ts = new Date().toISOString().substring(11, 23);
+        const phase = data.phase ? `[${String(data.phase).toUpperCase()}]` : '';
+        const agent = rawAgent ? `[${rawAgent.toUpperCase()}]` : '';
+        vscode.postMessage({ command: 'logEvent', line: `${ts} ${agent}${phase} ${data.message || event}` });
+      }
+
       if (event === 'run_started') {
+        vscode.postMessage({ command: 'clearLogs' });
+        vscode.postMessage({ command: 'logEvent', line: '─'.repeat(60) });
+        vscode.postMessage({ command: 'logEvent', line: `[JAME] Run started at ${new Date().toISOString()}` });
+        vscode.postMessage({ command: 'logEvent', line: '─'.repeat(60) });
         addSysMsg('Orchestration started', 'info');
         return;
       }
