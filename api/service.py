@@ -154,6 +154,57 @@ class OrchestratorService:
         except TimeoutError:
             return ""
 
+    async def _request_tool_call(
+        self,
+        run_id: str,
+        tool_call_id: str,
+        tool_name: str,
+        command: str,
+        args: list[str],
+    ) -> str:
+        """Emit a tool_call event and await the user's run/skip answer (max 300s)."""
+        future = self.store.request_tool_call(tool_call_id)
+        await self._emit(
+            run_id,
+            "tool_call",
+            f"QA wants to run: {tool_name}",
+            agent="qa",
+            phase="BUILD_AND_TEST",
+            payload={
+                "tool_call_id": tool_call_id,
+                "tool_name": tool_name,
+                "command": command,
+                "args": args,
+            },
+        )
+        try:
+            return await asyncio.wait_for(future, timeout=300.0)
+        except TimeoutError:
+            return "skip"
+
+    def _make_tool_call_fn(
+        self, run_id: str, loop: asyncio.AbstractEventLoop
+    ) -> "Callable[[str, str, str, list[str]], str]":
+        """Return a sync callable that emits a tool_call event and blocks for run/skip."""
+        svc = self
+
+        def _tool_call_sync(
+            tool_call_id: str,
+            tool_name: str,
+            command: str,
+            args: list[str],
+        ) -> str:
+            coro = svc._request_tool_call(
+                run_id, tool_call_id, tool_name, command, args
+            )
+            future = asyncio.run_coroutine_threadsafe(coro, loop)
+            try:
+                return future.result(timeout=305.0)
+            except Exception:
+                return "skip"
+
+        return _tool_call_sync
+
     def _make_clarify_fn(
         self, run_id: str, loop: asyncio.AbstractEventLoop
     ) -> Callable[[str, list[str] | None], str]:
@@ -268,6 +319,7 @@ class OrchestratorService:
         loop = asyncio.get_running_loop()
         clarify_fn = self._make_clarify_fn(run_id, loop)
         emit_fn = self._make_emit_fn(run_id, loop)
+        tool_call_fn = self._make_tool_call_fn(run_id, loop)
 
         run_output_dir = (self.output_root / run_id).resolve()
         run_output_dir.mkdir(parents=True, exist_ok=True)
@@ -295,6 +347,7 @@ class OrchestratorService:
             "mode": request.mode,
             "clarification_callback": clarify_fn,
             "emit_callback": emit_fn,
+            "tool_call_callback": tool_call_fn,
             "reasoning_logs": [],
             # Learning mode fields
             "learning_mode": request.learning_mode,

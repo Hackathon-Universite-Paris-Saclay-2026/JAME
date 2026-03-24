@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy" content="{{CSP}}" />
+  <link rel="stylesheet" href="{{CSS_URI}}" />
+</head>
+<body>
+  <div class="shell">
+    <div class="top-bar">
+      <div id="modeBadge" class="mode-badge m-senior" title="Click to change mode (or type /mode)">
+        <span class="mode-badge-icon" id="modeBadgeIcon">&#9670;</span>
+        <span id="modeBadgeLabel">Senior</span>
+        <span class="mode-badge-lock" id="modeBadgeLock" style="display:none">&#128274;</span>
+      </div>
+      <button class="new-chat-btn" id="showLogsBtn" title="Show backend logs in terminal">
+        <svg viewBox="0 0 16 16" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" fill="none">
+          <polyline points="2,4 6,8 2,12"/>
+          <line x1="8" y1="12" x2="14" y2="12"/>
+        </svg>
+        Logs
+      </button>
+      <button class="new-chat-btn" id="newChatBtn" title="New chat - clear conversation">
+        <svg viewBox="0 0 16 16" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="8" y1="2" x2="8" y2="14"/>
+          <line x1="2" y1="8" x2="14" y2="8"/>
+        </svg>
+        New chat
+      </button>
+    </div>
+
+    <div class="progress-bar-wrap">
+      <div class="progress-bar" id="progressBar"></div>
+    </div>
+
+    <div class="feed" id="feed">
+      <div class="empty" id="emptyState">
+        <svg class="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path stroke-linecap="round" stroke-linejoin="round"
+            d="M9.75 3.104v5.714a2.25 2.25 0 0 1-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 0 1 4.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3M14.25 3.104c.251.023.501.05.75.082M19.8 15.3l-1.57.393A9.065 9.065 0 0 1 12 15a9.065 9.065 0 0 0-6.23-.693L5 14.5m14.8.8 1.402 1.402c1.232 1.232.65 3.318-1.067 3.611A48.309 48.309 0 0 1 12 21a48.25 48.25 0 0 1-8.135-.687c-1.718-.293-2.3-2.379-1.067-3.61L5 14.5" />
+        </svg>
+        <p>Describe what you want to build. The multi-agent pipeline will architect, code, and validate it.</p>
+      </div>
+    </div>
+
+    <div class="jame-header">
+      <div id="jameTitle" class="jame-title">
+        <span class="jame-letters"><span class="j">J</span><span class="a">A</span><span class="m">M</span><span class="e">E</span></span>
+        <span class="jame-acronym"><span class="w-j">Just</span><span class="w-a">A</span><span class="w-m">Model-Driven</span><span class="w-e">Engineer</span></span>
+      </div>
+    </div>
+
+    <div class="files-panel" id="filesPanel">
+      <div class="files-panel-header">
+        <span class="files-panel-title">Files changed</span>
+        <span class="files-panel-summary" id="filesPanelSummary"></span>
+        <div class="files-panel-actions">
+          <button class="btn btn-success" id="fpKeepBtn" style="padding:3px 8px;font-size:10px">Keep All</button>
+          <button class="btn btn-danger"  id="fpUndoBtn" style="padding:3px 8px;font-size:10px">Undo All</button>
+        </div>
+      </div>
+      <div class="files-panel-body" id="filesPanelBody"></div>
+    </div>
+
+    <div class="input-area">
+      <div id="slashSuggestions" class="slash-suggestions"></div>
+      <div class="input-row">
+        <div id="slashPill" class="slash-pill">
+          <span id="slashPillLabel"></span>
+          <span class="slash-pill-x" id="slashPillX">&#x2715;</span>
+        </div>
+        <textarea id="input" rows="1" placeholder="Describe what to build..." spellcheck="false"></textarea>
+        <button class="stop-btn" id="stopBtn" style="display:none" title="Stop generation">
+          <svg viewBox="0 0 10 10"><rect x="1" y="1" width="8" height="8"/></svg>
+        </button>
+        <button class="send-btn" id="sendBtn" title="Build (Enter)">
+          <svg viewBox="0 0 16 16"><path d="M1 1l14 7L1 15V9l10-2L1 7V1z"/></svg>
+        </button>
+      </div>
+      <div class="hint">Enter to send &middot; Shift+Enter for new line</div>
+      <div class="ai-act-notice">&#9432; This tool uses AI &mdash; outputs may contain errors. You are responsible for reviewing generated code before use.</div>
+    </div>
+  </div>
+
+  <div id="newChatConfirm" class="nc-overlay">
+    <div class="nc-modal">
+      <p class="nc-msg">A build is currently running.<br>Starting a new chat will <strong>stop execution</strong>.<br>Continue?</p>
+      <div class="nc-actions">
+        <button id="newChatConfirmOk"     class="btn btn-danger">Stop &amp; New Chat</button>
+        <button id="newChatConfirmCancel" class="btn btn-secondary">Keep Running</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="modeChangeConfirm" class="nc-overlay">
+    <div class="nc-modal">
+      <p class="nc-msg" id="modeChangeMsg">Switch to <strong id="modeChangeTarget"></strong> mode?<br>This will <strong>clear the current chat</strong>.</p>
+      <div class="nc-actions">
+        <button id="modeChangeOk"     class="btn btn-primary">Switch &amp; Clear</button>
+        <button id="modeChangeCancel" class="btn btn-secondary">Keep Current</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="{{JS_URI}}" nonce="{{NONCE}}"></script>
+</body>
+</html>

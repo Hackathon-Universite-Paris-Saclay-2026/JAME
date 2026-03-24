@@ -53,6 +53,18 @@ class ClarifyRequest(BaseModel):
     )
 
 
+class ToolResponseRequest(BaseModel):
+    """Request body for POST /runs/{run_id}/tool-response."""
+
+    tool_call_id: str = Field(
+        description="The id of the tool_call event the user is responding to.",
+    )
+    action: str = Field(
+        pattern="^(run|skip)$",
+        description="'run' to execute the tool, 'skip' to skip it.",
+    )
+
+
 class SubmitRequest(BaseModel):
     """Request body for POST /runs/{run_id}/submit."""
 
