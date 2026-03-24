@@ -845,7 +845,13 @@ def developer_node(state: AgentState) -> dict:
         if _emit:
             _emit(entry)
 
-    _log({"agent": "developer", "phase": "plan", "content": "Developer agent starting…"})
+    _log(
+        {
+            "agent": "developer",
+            "phase": "plan",
+            "content": "Developer agent starting…",
+        }
+    )
     llm = get_cortex_llm(model="deepseek-r1", temperature=0.2, max_tokens=8000)
 
     specs = state.get("specs", "")
@@ -866,13 +872,25 @@ def developer_node(state: AgentState) -> dict:
                 Path(lw_run_output_dir) / "output" / "project"
             ).resolve()
             lw_project_dir.mkdir(parents=True, exist_ok=True)
-        _log({"agent": "developer", "phase": "plan", "content": f"Lightweight scope ({scope}) — minimal file set."})
+        _log(
+            {
+                "agent": "developer",
+                "phase": "plan",
+                "content": f"Lightweight scope ({scope}) — minimal file set.",
+            }
+        )
         code_files = _run_lightweight(llm, scope, specs, lw_project_dir)
         file_list = (
             ", ".join(f["path"] for f in code_files) if code_files else "(none)"
         )
         reason = f"Lightweight ({scope}): generated {len(code_files)} file(s): {file_list}"
-        _log({"agent": "developer", "phase": "act", "content": f"Generated {len(code_files)} file(s)."})
+        _log(
+            {
+                "agent": "developer",
+                "phase": "act",
+                "content": f"Generated {len(code_files)} file(s).",
+            }
+        )
         print(f"\n[REASON] {reason}\n")
         _log({"agent": "developer", "phase": "reason", "content": reason})
         return {
@@ -897,7 +915,13 @@ def developer_node(state: AgentState) -> dict:
     raise_if_cancelled()
     functional_design = state.get("functional_design", "")
     if iteration == 0:
-        _log({"agent": "developer", "phase": "design", "content": "Extracting functional design…"})
+        _log(
+            {
+                "agent": "developer",
+                "phase": "design",
+                "content": "Extracting functional design…",
+            }
+        )
         functional_design = _run_functional_design(llm, specs)
         design_trace = (
             f"Extracted functional design ({len(functional_design)} chars): "
@@ -910,7 +934,13 @@ def developer_node(state: AgentState) -> dict:
 
     # ── Phase 2: File Planning ───────────────────────────────────
     raise_if_cancelled()
-    _log({"agent": "developer", "phase": "plan", "content": "Planning files to generate…"})
+    _log(
+        {
+            "agent": "developer",
+            "phase": "plan",
+            "content": "Planning files to generate…",
+        }
+    )
     file_plan, plan_trace = _run_file_planning(
         llm,
         specs,
@@ -928,7 +958,13 @@ def developer_node(state: AgentState) -> dict:
         project_dir = (Path(run_output_dir) / "output" / "project").resolve()
         project_dir.mkdir(parents=True, exist_ok=True)
 
-    _log({"agent": "developer", "phase": "act", "content": f"Generating code files (dependency-ordered)…"})
+    _log(
+        {
+            "agent": "developer",
+            "phase": "act",
+            "content": "Generating code files (dependency-ordered)…",
+        }
+    )
     existing_files = {f["path"]: f for f in state.get("code_files", [])}
     code_files, generated = _run_code_generation(
         llm,
@@ -941,10 +977,22 @@ def developer_node(state: AgentState) -> dict:
         iteration,
         project_dir,
     )
-    _log({"agent": "developer", "phase": "act", "content": f"Chunked generation: {len(code_files)} files produced."})
+    _log(
+        {
+            "agent": "developer",
+            "phase": "act",
+            "content": f"Chunked generation: {len(code_files)} files produced.",
+        }
+    )
 
     # ── Phase 4: Self-Validation ─────────────────────────────────
-    _log({"agent": "developer", "phase": "validate", "content": "Running self-validation…"})
+    _log(
+        {
+            "agent": "developer",
+            "phase": "validate",
+            "content": "Running self-validation…",
+        }
+    )
     validation_issues = _run_self_validation(llm, code_files)
     if validation_issues:
         _run_auto_fix(

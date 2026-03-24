@@ -376,7 +376,13 @@ def devops_node(state: AgentState) -> dict:
         if _emit:
             _emit(entry)
 
-    _log({"agent": "devops", "phase": "plan", "content": "DevOps agent starting…"})
+    _log(
+        {
+            "agent": "devops",
+            "phase": "plan",
+            "content": "DevOps agent starting…",
+        }
+    )
     llm = get_cortex_llm(model="deepseek-r1", temperature=0.1, max_tokens=4096)
 
     specs = state.get("specs", "")
@@ -406,7 +412,9 @@ def devops_node(state: AgentState) -> dict:
 
     # ── Plan phase: decide CI/CD scope ────────────────────────────────────────
     print("\n[PLAN] Deciding CI/CD scope …")
-    _log({"agent": "devops", "phase": "plan", "content": "Deciding CI/CD scope…"})
+    _log(
+        {"agent": "devops", "phase": "plan", "content": "Deciding CI/CD scope…"}
+    )
     decision = _decide(llm, context)
     plan_trace = (
         f"CI={decision.needs_ci}, CD={decision.needs_cd}. {decision.reasoning}"
@@ -435,7 +443,13 @@ def devops_node(state: AgentState) -> dict:
 
     # ── Plan phase: select files ───────────────────────────────────────────────
     print("[PLAN] Selecting files to generate …")
-    _log({"agent": "devops", "phase": "plan", "content": "Selecting files to generate…"})
+    _log(
+        {
+            "agent": "devops",
+            "phase": "plan",
+            "content": "Selecting files to generate…",
+        }
+    )
     file_plan = _plan_files(llm, context, decision.needs_cd)
 
     # Ensure mandatory workflow files are always present
@@ -485,7 +499,13 @@ def devops_node(state: AgentState) -> dict:
     tasks = ci_tasks + cd_tasks
     task_meta = ci_meta + cd_meta
     print(f"[ACT]  Generating {len(tasks)} file(s) in parallel …")
-    _log({"agent": "devops", "phase": "act", "content": f"Generating {len(tasks)} CI/CD file(s) in parallel…"})
+    _log(
+        {
+            "agent": "devops",
+            "phase": "act",
+            "content": f"Generating {len(tasks)} CI/CD file(s) in parallel…",
+        }
+    )
     contents: list[str] = run_parallel(tasks)
 
     ci_files: list[dict] = []
@@ -503,7 +523,13 @@ def devops_node(state: AgentState) -> dict:
     cd_summary = ", ".join(f["path"] for f in cd_files) or "(none)"
     reason_trace = f"CI: {ci_summary} | CD: {cd_summary}"
     print(f"\n[REASON] {reason_trace}\n")
-    _log({"agent": "devops", "phase": "act", "content": f"Generated {len(ci_files)} CI + {len(cd_files)} CD files."})
+    _log(
+        {
+            "agent": "devops",
+            "phase": "act",
+            "content": f"Generated {len(ci_files)} CI + {len(cd_files)} CD files.",
+        }
+    )
     _log({"agent": "devops", "phase": "reason", "content": reason_trace})
 
     return {
