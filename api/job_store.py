@@ -168,3 +168,7 @@ class InMemoryRunStore:
         listeners = self._subscribers.get(run_id, [])
         if queue in listeners:
             listeners.remove(queue)
+
+    def has_subscribers(self, run_id: str) -> bool:
+        """Return True when at least one WebSocket client is subscribed to this run."""
+        return bool(self._subscribers.get(run_id))
