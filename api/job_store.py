@@ -72,9 +72,9 @@ class InMemoryRunStore:
         self._chunk_queues[run_id] = chunk_queue
 
     def cancel_run(self, run_id: str) -> bool:
-        """Cancel a running run — fires the token AND unblocks the async queue immediately."""
+        """Cancel a running (or pending) run — fires the token AND unblocks the async queue immediately."""
         record = self._runs.get(run_id)
-        if record and record.status == RunStatus.RUNNING:
+        if record and record.status in (RunStatus.RUNNING, RunStatus.PENDING):
             self._cancelled.add(run_id)
             token = self._tokens.get(run_id)
             if token:
