@@ -522,51 +522,79 @@ class OrchestratorService:
                     if node_name == "developer" and node_update.get(
                         "code_files"
                     ):
+                        is_junior_mode = final_state.get("mode") == "junior"
                         dev_files = node_update["code_files"]
                         project_dir_node = (
                             run_output_dir / "output" / "project"
                         ).resolve()
                         emitted_paths: list[str] = []
 
-                        for cf in dev_files:
-                            p = cf["path"] if isinstance(cf, dict) else cf.path
-                            c = (
-                                cf["content"]
-                                if isinstance(cf, dict)
-                                else cf.content
-                            )
-                            lang = (
-                                cf.get("language", "text")
-                                if isinstance(cf, dict)
-                                else cf.language
-                            )
-                            if p:
-                                emitted_paths.append(str(project_dir_node / p))
+                        if is_junior_mode:
                             await self._emit(
                                 run_id=run_id,
-                                event="file_generated",
-                                message=f"Generated: {p}",
+                                event="agent_update",
+                                message=(
+                                    "Developer produced candidate files; "
+                                    "withholding direct delivery in junior mode "
+                                    "until exercise packaging completes."
+                                ),
                                 agent="developer",
                                 phase="CONSTRUCTION",
                                 payload={
-                                    "path": p,
-                                    "content": c,
-                                    "language": lang,
+                                    "withheld_files_count": len(dev_files),
+                                    "iteration": final_state.get(
+                                        "iteration", 0
+                                    ),
                                 },
                             )
+                        else:
+                            for cf in dev_files:
+                                p = (
+                                    cf["path"]
+                                    if isinstance(cf, dict)
+                                    else cf.path
+                                )
+                                c = (
+                                    cf["content"]
+                                    if isinstance(cf, dict)
+                                    else cf.content
+                                )
+                                lang = (
+                                    cf.get("language", "text")
+                                    if isinstance(cf, dict)
+                                    else cf.language
+                                )
+                                if p:
+                                    emitted_paths.append(
+                                        str(project_dir_node / p)
+                                    )
+                                await self._emit(
+                                    run_id=run_id,
+                                    event="file_generated",
+                                    message=f"Generated: {p}",
+                                    agent="developer",
+                                    phase="CONSTRUCTION",
+                                    payload={
+                                        "path": p,
+                                        "content": c,
+                                        "language": lang,
+                                    },
+                                )
 
-                        await self._emit(
-                            run_id=run_id,
-                            event="files_ready",
-                            message=f"{len(emitted_paths)} file(s) written — review before QA continues",
-                            agent="developer",
-                            phase="CONSTRUCTION",
-                            payload={
-                                "project_dir": str(project_dir_node),
-                                "generated_files": emitted_paths,
-                                "iteration": final_state.get("iteration", 0),
-                            },
-                        )
+                            await self._emit(
+                                run_id=run_id,
+                                event="files_ready",
+                                message=f"{len(emitted_paths)} file(s) written — review before QA continues",
+                                agent="developer",
+                                phase="CONSTRUCTION",
+                                payload={
+                                    "project_dir": str(project_dir_node),
+                                    "generated_files": emitted_paths,
+                                    "iteration": final_state.get(
+                                        "iteration", 0
+                                    ),
+                                },
+                            )
 
                     # After exercise_generator: save exercise files to disk + emit event
                     if node_name == "exercise_generator":
@@ -610,6 +638,38 @@ class OrchestratorService:
                             f if isinstance(f, dict) else f.model_dump()
                             for f in exercise_files
                         ]
+
+                        # Junior mode file delivery happens only here, after stripping.
+                        for ef in serialized:
+                            await self._emit(
+                                run_id=run_id,
+                                event="file_generated",
+                                message=f"Exercise generated: {ef.get('path', '')}",
+                                agent="exercise_generator",
+                                phase="LEARNING",
+                                payload={
+                                    "path": ef.get("path", ""),
+                                    "content": ef.get("content", ""),
+                                    "language": ef.get("language", "text"),
+                                },
+                            )
+
+                        await self._emit(
+                            run_id=run_id,
+                            event="files_ready",
+                            message=(
+                                f"{len(exercise_paths)} exercise file(s) ready "
+                                "for implementation"
+                            ),
+                            agent="exercise_generator",
+                            phase="LEARNING",
+                            payload={
+                                "project_dir": str(exercise_dir),
+                                "generated_files": exercise_paths,
+                                "iteration": final_state.get("iteration", 0),
+                            },
+                        )
+
                         await self._emit(
                             run_id=run_id,
                             event="exercise_ready",
@@ -669,16 +729,17 @@ class OrchestratorService:
 
             project_dir = (run_output_dir / "output" / "project").resolve()
             generated_files: list[str] = []
-            for code_file in final_state.get("code_files", []):
-                rel_path = (
-                    code_file.get("path", "")
-                    if isinstance(code_file, dict)
-                    else code_file.path
-                )
-                if rel_path:
-                    generated_files.append(
-                        str((project_dir / rel_path).resolve())
+            if final_state.get("mode") != "junior":
+                for code_file in final_state.get("code_files", []):
+                    rel_path = (
+                        code_file.get("path", "")
+                        if isinstance(code_file, dict)
+                        else code_file.path
                     )
+                    if rel_path:
+                        generated_files.append(
+                            str((project_dir / rel_path).resolve())
+                        )
 
             # Exclude non-serialisable fields before JSON-encoding the state
             serialisable_state = {

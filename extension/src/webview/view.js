@@ -1289,6 +1289,203 @@ function stop() {
   addSysMsg('Cancellation requested...', 'warn');
 }
 
+// Junior mode: show a card with learning objectives + Submit button.
+// Junior works on the exercise files via the files panel, then hits Submit.
+const _EXERCISE_ICON_SVG =
+  '<svg class="exercise-icon-svg" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">' +
+  '<rect x="1" y="2" width="14" height="12" rx="2" stroke="currentColor" stroke-width="1.4"/>' +
+  '<path d="M4 6h5M4 9h8M4 12h6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>' +
+  '<path d="M11 3V1m0 0l-1.5 1.5M11 1l1.5 1.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>' +
+  '</svg>';
+
+let _exerciseBarSubmitBtn = null;
+
+function showSubmitExerciseCard(objectives) {
+  const bar = document.getElementById('exerciseBar');
+  if (!bar) return;
+
+  bar.innerHTML = '';
+  bar.style.display = '';
+
+  // Left: icon + label + objectives pill
+  const left = document.createElement('div');
+  left.className = 'ex-bar-left';
+
+  const titleRow = document.createElement('div');
+  titleRow.className = 'ex-bar-title-row';
+  titleRow.innerHTML = _EXERCISE_ICON_SVG + '<span class="ex-bar-title">Exercise ready</span>';
+  left.appendChild(titleRow);
+
+  if (objectives.length > 0) {
+    const objWrap = document.createElement('div');
+    objWrap.className = 'ex-bar-objectives';
+    objectives.forEach(function(obj) {
+      const chip = document.createElement('span');
+      chip.className = 'ex-bar-obj-chip';
+      chip.textContent = obj;
+      objWrap.appendChild(chip);
+    });
+    left.appendChild(objWrap);
+  }
+
+  bar.appendChild(left);
+
+  // Right: submit button
+  const right = document.createElement('div');
+  right.className = 'ex-bar-right';
+
+  const submitBtn = document.createElement('button');
+  submitBtn.className = 'btn btn-primary ex-bar-submit-btn';
+  submitBtn.textContent = 'Submit';
+  _exerciseBarSubmitBtn = submitBtn;
+
+  submitBtn.addEventListener('click', function() {
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Submitting…';
+    vscode.postMessage({ command: 'submitExercise', runId: currentRunId });
+  });
+
+  right.appendChild(submitBtn);
+  bar.appendChild(right);
+}
+
+function hideExerciseBar() {
+  const bar = document.getElementById('exerciseBar');
+  if (bar) bar.style.display = 'none';
+  _exerciseBarSubmitBtn = null;
+}
+
+// Show validation result in the feed (readable, structured).
+function showSubmitResult(passed, score, feedback) {
+  // Re-enable the submit button so user can retry
+  if (_exerciseBarSubmitBtn) {
+    _exerciseBarSubmitBtn.disabled = false;
+    _exerciseBarSubmitBtn.textContent = 'Submit again';
+  }
+
+  const card = document.createElement('div');
+  card.className = 'exercise-result-card fade-in ' + (passed ? 'result-pass' : 'result-fail');
+
+  // Score row
+  const scoreRow = document.createElement('div');
+  scoreRow.className = 'er-score-row';
+  const scoreIcon = document.createElement('span');
+  scoreIcon.className = 'er-score-icon';
+  scoreIcon.innerHTML = passed
+    ? '<svg viewBox="0 0 16 16"><path d="M3 8l3.5 3.5L13 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>'
+    : '<svg viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/></svg>';
+  const scoreLabel = document.createElement('span');
+  scoreLabel.className = 'er-score-label';
+  scoreLabel.innerHTML = passed
+    ? '<strong>Passed</strong>'
+    : '<strong>Not yet — keep going</strong>';
+  const scoreBadge = document.createElement('span');
+  scoreBadge.className = 'er-score-badge';
+  scoreBadge.textContent = score + ' / 100';
+  scoreRow.appendChild(scoreIcon);
+  scoreRow.appendChild(scoreLabel);
+  scoreRow.appendChild(scoreBadge);
+  card.appendChild(scoreRow);
+
+  if (feedback) {
+    const fb = document.createElement('div');
+    fb.className = 'er-feedback';
+    // Split sections by double-newline for better readability
+    feedback.trim().split(/\n{2,}/).forEach(function(block, i) {
+      if (i > 0) {
+        const sep = document.createElement('div');
+        sep.className = 'er-sep';
+        fb.appendChild(sep);
+      }
+      const p = document.createElement('p');
+      p.className = 'er-block';
+      p.textContent = block.trim();
+      fb.appendChild(p);
+    });
+    card.appendChild(fb);
+  }
+
+  if (!passed) {
+    const continueBtn = document.createElement('button');
+    continueBtn.className = 'btn btn-secondary er-continue-btn';
+    continueBtn.textContent = 'Continue working';
+    continueBtn.addEventListener('click', function() {
+      continueBtn.remove();
+    });
+    card.appendChild(continueBtn);
+  } else {
+    hideExerciseBar();
+  }
+
+  feed.appendChild(card);
+  scrollFeed();
+}
+
+// Queue-prompt: inject an instruction into the active run's developer queue.
+function showQueuePromptForm() {
+  if (!currentRunId || !isRunning) return;
+
+  const card = document.createElement('div');
+  card.className = 'queue-prompt-card fade-in';
+
+  const header = document.createElement('div');
+  header.className = 'queue-prompt-header';
+  header.innerHTML =
+    '<span class="queue-prompt-icon">&#128172;</span>' +
+    '<span class="queue-prompt-title">Inject instruction into next developer iteration</span>';
+  card.appendChild(header);
+
+  const textRow = document.createElement('div');
+  textRow.className = 'queue-prompt-text-row';
+  const textArea = document.createElement('textarea');
+  textArea.className = 'clarify-text';
+  textArea.placeholder = 'Type instructions for the developer…';
+  textArea.rows = 2;
+  textRow.appendChild(textArea);
+  card.appendChild(textRow);
+
+  const actions = document.createElement('div');
+  actions.className = 'queue-prompt-actions';
+
+  const queueSendBtn = document.createElement('button');
+  queueSendBtn.className = 'btn btn-primary';
+  queueSendBtn.textContent = 'Queue';
+
+  const queueCancelBtn = document.createElement('button');
+  queueCancelBtn.className = 'btn btn-secondary';
+  queueCancelBtn.textContent = 'Cancel';
+
+  actions.appendChild(queueSendBtn);
+  actions.appendChild(queueCancelBtn);
+  card.appendChild(actions);
+
+  function dismiss() { card.remove(); }
+
+  queueSendBtn.addEventListener('click', function() {
+    const prompt = textArea.value.trim();
+    if (!prompt) { textArea.focus(); return; }
+    const summary = document.createElement('div');
+    summary.className = 'clarify-summary';
+    summary.innerHTML =
+      '<div class="cs-q">Queued instruction</div>' +
+      '<div class="cs-a">' + escHtml(prompt) + '</div>';
+    card.replaceWith(summary);
+    vscode.postMessage({ command: 'queuePrompt', runId: currentRunId, prompt });
+    scrollFeed();
+  });
+
+  queueCancelBtn.addEventListener('click', dismiss);
+
+  textArea.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); queueSendBtn.click(); }
+    if (e.key === 'Escape') dismiss();
+  });
+
+  feed.appendChild(card);
+  scrollFeed();
+  textArea.focus();
+}
+
 function newChat() {
   if (isRunning && currentRunId) {
     newChatConfirmEl.style.display = 'flex';
@@ -1323,6 +1520,7 @@ function doNewChat() {
   inputEl.value = '';
   inputEl.style.height = 'auto';
 
+  hideExerciseBar();
   feed.innerHTML = '';
   const emptyDiv = document.createElement('div');
   emptyDiv.className = 'empty';
@@ -1404,6 +1602,11 @@ window.addEventListener('message', async (event) => {
 
   if (msg.command === 'allDiscarded') {
     addSysMsg('All proposed changes discarded.', 'warn');
+    return;
+  }
+
+  if (msg.command === 'submitResult') {
+    showSubmitResult(!!msg.passed, msg.score ?? 0, msg.feedback ?? '');
     return;
   }
 });
@@ -1509,6 +1712,23 @@ function handleServerEvent(data) {
   }
 
   if (event === 'files_ready') {
+    const p = data.payload || {};
+    if (Array.isArray(p.generated_files) && p.generated_files.length > 0) {
+      filesPanel.classList.add('visible');
+    }
+    return;
+  }
+
+  if (event === 'exercise_ready') {
+    const p = data.payload || {};
+    const objectives = Array.isArray(p.learning_objectives) ? p.learning_objectives : [];
+    addSysMsg('Learning exercise ready' + (objectives.length ? ' (' + objectives.length + ' objective(s)).' : '.'), 'ok');
+    // Open the files panel so the junior can see and work on the exercise stubs
+    filesPanel.classList.add('visible');
+    // Unlock the UI — junior run is in AWAITING_SUBMISSION, not COMPLETED
+    setRunning(false);
+    // Show a submit card so the junior can submit their implementation
+    showSubmitExerciseCard(objectives);
     return;
   }
 
@@ -1563,6 +1783,14 @@ function handleServerEvent(data) {
   if (event === 'run_cancelled') {
     addSysMsg('Build cancelled.', 'warn');
     setRunning(false);
+    if (ws) ws.close();
+    return;
+  }
+
+  if (event === 'awaiting_submission') {
+    addSysMsg(data.message || 'Pipeline complete - waiting for your implementation.', 'ok');
+    setRunning(false);
+    clearProgress();
     if (ws) ws.close();
     return;
   }

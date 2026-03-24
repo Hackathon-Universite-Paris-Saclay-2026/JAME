@@ -536,19 +536,6 @@ def architect_node(state: AgentState) -> dict:
                 diagrams, encoding="utf-8"
             )
 
-    run_output_dir = state.get("run_output_dir", "")
-    if run_output_dir:
-        output_dir = (Path(run_output_dir) / "output").resolve()
-        output_dir.mkdir(parents=True, exist_ok=True)
-        if specs:
-            (output_dir / "specifications.md").write_text(
-                specs, encoding="utf-8"
-            )
-        if diagrams:
-            (output_dir / "c4_diagrams.md").write_text(
-                diagrams, encoding="utf-8"
-            )
-
     return {
         "scope": scope,
         "specs": specs,

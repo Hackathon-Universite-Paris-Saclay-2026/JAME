@@ -864,6 +864,32 @@ def developer_node(state: AgentState) -> dict:
     qa_issues = state.get("qa_issues", [])
     iteration = state.get("iteration", 0)
 
+    # ── Mode-aware preamble + senior prompt queue injection ──────
+    mode = state.get("mode", "senior")
+    mode_note = get_mode_preamble(mode)
+
+    # Consume queued instructions — prepend to specs context for this iteration.
+    # Available to all modes: any human can inject instructions via the queue.
+    senior_queue: list[str] = list(state.get("senior_prompt_queue", []))
+    senior_instructions = ""
+    if senior_queue:
+        senior_instructions = (
+            "\n\n## Developer instructions (queued by user):\n"
+            + "\n".join(f"- {p}" for p in senior_queue)
+        )
+        _log(
+            {
+                "agent": "developer",
+                "phase": "plan",
+                "content": f"Applying {len(senior_queue)} queued instruction(s).",
+            }
+        )
+
+    # Prepend mode note and queued instructions to specs for this iteration.
+    augmented_specs = (
+        f"## Mode instruction\n{mode_note}\n\n{specs}{senior_instructions}"
+    )
+
     # ── Lightweight path: function / feature scope ───────────────
     if scope in LIGHTWEIGHT_SCOPES and iteration == 0:
         print(
@@ -883,7 +909,12 @@ def developer_node(state: AgentState) -> dict:
                 "content": f"Lightweight scope ({scope}) — minimal file set.",
             }
         )
-        code_files = _run_lightweight(llm, scope, specs, lw_project_dir)
+        code_files = _run_lightweight(
+            llm,
+            scope,
+            augmented_specs,
+            lw_project_dir,
+        )
         file_list = (
             ", ".join(f["path"] for f in code_files) if code_files else "(none)"
         )
@@ -914,32 +945,6 @@ def developer_node(state: AgentState) -> dict:
                 {"agent": "developer", "phase": "reason", "content": reason},
             ],
         }
-
-    # ── Mode-aware preamble + senior prompt queue injection ──────
-    mode = state.get("mode", "senior")
-    mode_note = get_mode_preamble(mode)
-
-    # Consume queued instructions — prepend to specs context for this iteration.
-    # Available to all modes: any human can inject instructions via the queue.
-    senior_queue: list[str] = list(state.get("senior_prompt_queue", []))
-    senior_instructions = ""
-    if senior_queue:
-        senior_instructions = (
-            "\n\n## Developer instructions (queued by user):\n"
-            + "\n".join(f"- {p}" for p in senior_queue)
-        )
-        _log(
-            {
-                "agent": "developer",
-                "phase": "plan",
-                "content": f"Applying {len(senior_queue)} queued instruction(s).",
-            }
-        )
-
-    # Prepend mode note and queued instructions to specs for this iteration.
-    augmented_specs = (
-        f"## Mode instruction\n{mode_note}\n\n{specs}{senior_instructions}"
-    )
 
     # ── Phase 1: Functional Design ───────────────────────────────
     raise_if_cancelled()

@@ -22,17 +22,6 @@ from graph.nodes.qa_node import qa_node
 from graph.state import AgentState
 
 
-def _route_after_architect(state: AgentState) -> str:
-    """Require explicit specs approval for complex scopes before coding starts."""
-    scope = state.get("scope", "")
-    if scope in ("system", "product") and not state.get(
-        "specs_approved", False
-    ):
-        print("\n⏸️  Specs not approved yet — routing back to Architect.")
-        return "architect"
-    return "developer"
-
-
 def _should_retry_or_continue(state: AgentState) -> str:
     """Conditional edge after QA: route back to Developer or forward to DevOps.
 
@@ -80,11 +69,7 @@ def build_graph() -> StateGraph:
 
     # ── Edges ────────────────────────────────────────────────────
     workflow.set_entry_point("architect")
-    workflow.add_conditional_edges(
-        "architect",
-        _route_after_architect,
-        {"architect": "architect", "developer": "developer"},
-    )
+    workflow.add_edge("architect", "developer")
     workflow.add_edge("developer", "qa")
     workflow.add_conditional_edges(
         "qa",

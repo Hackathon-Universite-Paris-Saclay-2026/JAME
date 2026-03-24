@@ -215,6 +215,40 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
         return;
       }
 
+      if (msg.command === "submitExercise") {
+        const backendUrlForSubmit = this.resolvedBackendUrl ?? vscode.workspace
+          .getConfiguration()
+          .get<string>("jameWorkflow.backendUrl", "http://localhost:8000");
+        const fetchFnSubmit = (globalThis as { fetch?: (input: string, init?: unknown) => Promise<any> }).fetch;
+        if (fetchFnSubmit && msg.runId) {
+          const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+          const files: { path: string; content: string; language: string }[] = [];
+          if (workspaceRoot) {
+            // Read all generated/exercise files that have been saved to workspace
+            for (const [relPath, _content] of this.generatedFiles.entries()) {
+              const absPath = path.join(workspaceRoot, relPath);
+              if (fs.existsSync(absPath)) {
+                const content = fs.readFileSync(absPath, "utf-8");
+                const ext = path.extname(relPath).replace(".", "") || "text";
+                files.push({ path: relPath, content, language: ext });
+              }
+            }
+          }
+          try {
+            const resp = await fetchFnSubmit(`${backendUrlForSubmit}/runs/${msg.runId}/submit`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ files }),
+            });
+            if (resp.ok) {
+              const result = await resp.json() as { passed: boolean; score: number; feedback: string };
+              webviewView.webview.postMessage({ command: "submitResult", passed: result.passed, score: result.score, feedback: result.feedback });
+            }
+          } catch { /* ignore */ }
+        }
+        return;
+      }
+
       if (msg.command === "submitToolResponse") {
         const backendUrlForTool = this.resolvedBackendUrl ?? vscode.workspace
           .getConfiguration()
