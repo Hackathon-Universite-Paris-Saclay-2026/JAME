@@ -1106,6 +1106,97 @@ function showSpecsReviewCard(question, specs) {
   scrollFeed();
 }
 
+// Iteration review card — senior mode: proceed or inject instructions
+function showIterationReviewCard(question) {
+  const card = document.createElement('div');
+  card.className = 'iter-review-card fade-in';
+
+  const header = document.createElement('div');
+  header.className = 'iter-review-header';
+  header.innerHTML =
+    '<span class="iter-review-icon">&#128269;</span>' +
+    '<span class="iter-review-title">QA Iteration Review</span>';
+  card.appendChild(header);
+
+  // Strip the sentinel prefix for display
+  const displayText = question.replace(/^QA iteration review:\s*/i, '');
+  const qEl = document.createElement('div');
+  qEl.className = 'iter-review-body';
+  qEl.innerHTML = renderMd(displayText);
+  card.appendChild(qEl);
+
+  const instrRow = document.createElement('div');
+  instrRow.className = 'iter-review-instr-row';
+  instrRow.style.display = 'none';
+  const instrArea = document.createElement('textarea');
+  instrArea.className = 'clarify-text';
+  instrArea.placeholder = 'Type instructions for the developer (optional)…';
+  instrArea.rows = 2;
+  instrRow.appendChild(instrArea);
+  card.appendChild(instrRow);
+
+  const actions = document.createElement('div');
+  actions.className = 'iter-review-actions';
+
+  const proceedBtn = document.createElement('button');
+  proceedBtn.className = 'btn btn-success';
+  proceedBtn.textContent = '▶ Proceed automatically';
+
+  const instrBtn = document.createElement('button');
+  instrBtn.className = 'btn btn-secondary';
+  instrBtn.textContent = '✎ Add instructions';
+
+  const sendInstrBtn = document.createElement('button');
+  sendInstrBtn.className = 'btn btn-primary';
+  sendInstrBtn.textContent = 'Send';
+  sendInstrBtn.style.display = 'none';
+
+  actions.appendChild(proceedBtn);
+  actions.appendChild(instrBtn);
+  actions.appendChild(sendInstrBtn);
+  card.appendChild(actions);
+
+  function settle(answer) {
+    proceedBtn.disabled = true;
+    instrBtn.disabled = true;
+    sendInstrBtn.disabled = true;
+    instrArea.disabled = true;
+    const summary = document.createElement('div');
+    summary.className = 'clarify-summary';
+    summary.innerHTML =
+      '<div class="cs-q">QA Iteration Review</div>' +
+      '<div class="cs-a">' + escHtml(answer === 'proceed' ? 'Proceeding with automatic fixes.' : 'Instructions queued: ' + answer) + '</div>';
+    card.replaceWith(summary);
+    vscode.postMessage({ command: 'submitClarification', runId: currentRunId, answer });
+    scrollFeed();
+  }
+
+  proceedBtn.addEventListener('click', () => settle('proceed'));
+
+  instrBtn.addEventListener('click', () => {
+    instrRow.style.display = '';
+    instrBtn.style.display = 'none';
+    sendInstrBtn.style.display = '';
+    instrArea.focus();
+  });
+
+  sendInstrBtn.addEventListener('click', () => {
+    const txt = instrArea.value.trim();
+    settle(txt || 'proceed');
+  });
+
+  instrArea.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      const txt = instrArea.value.trim();
+      settle(txt || 'proceed');
+    }
+  });
+
+  feed.appendChild(card);
+  scrollFeed();
+}
+
 // Send / stop
 function send() {
   const text = inputEl.value.trim();
@@ -1381,6 +1472,13 @@ function handleServerEvent(data) {
     const question = p.question || data.message || 'Review specifications:';
     const specs = p.specs || '';
     showSpecsReviewCard(question, specs);
+    return;
+  }
+
+  if (event === 'iteration_review_request') {
+    const p = data.payload || {};
+    const question = p.question || data.message || 'QA iteration review:';
+    showIterationReviewCard(question);
     return;
   }
 

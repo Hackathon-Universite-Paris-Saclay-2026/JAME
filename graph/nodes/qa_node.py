@@ -369,6 +369,33 @@ def _ask_tool(
     return tool_call_fn(tool_call_id, tool_name, command, args)
 
 
+def _ruff_code_is_blocking(code: str) -> bool:
+    """Return True for ruff codes that indicate real correctness/security issues.
+
+    Style-only codes (docstrings, formatting, import order, naming conventions)
+    are classified as minor so they don't block QA when tests pass.
+    Codes starting with E/W (pycodestyle), D (pydocstyle), ANN (annotations),
+    N (naming), Q (quotes), UP (pyupgrade), RET (return), TRY, SIM, etc.
+    are style — not blocking.  Codes starting with S (bandit security), B
+    (bugbear), F (pyflakes errors), C90 (complexity), and PL (pylint errors)
+    are blocking.
+    """
+    if not code:
+        return False
+    # Always blocking: security (S), flakes errors (F8xx), bugbear (B), pylint errors (PLE/PLR/PLC)
+    blocking_prefixes = ("S", "B", "F8", "F9", "C90", "PLE", "PLR", "PLC")
+    for prefix in blocking_prefixes:
+        if code.startswith(prefix):
+            return True
+    # Explicitly not blocking: style/cosmetic
+    style_prefixes = ("E", "W", "D", "ANN", "N", "Q", "UP", "RET", "TRY", "SIM", "I", "T", "PT", "ERA")
+    for prefix in style_prefixes:
+        if code.startswith(prefix):
+            return False
+    # Default: treat unknown codes as minor to avoid false blocking
+    return False
+
+
 def _run_tool_checks(
     code_files: list[CodeFile],
     project_dir: Path,
@@ -439,11 +466,14 @@ def _run_tool_checks(
             for d in diagnostics:
                 loc = d.get("location", {})
                 line = loc.get("row", "?")
+                code = d.get("code", "?")
+                # Security / correctness rules stay major; pure style/lint → minor
+                severity = "major" if _ruff_code_is_blocking(code) else "minor"
                 issues.append(
                     QAIssue(
                         file=d.get("filename", "UNKNOWN"),
-                        severity="major",
-                        description=f"[ruff] {d.get('code', '?')} line {line}: {d.get('message', '')}",
+                        severity=severity,
+                        description=f"[ruff] {code} line {line}: {d.get('message', '')}",
                     )
                 )
         else:
@@ -812,6 +842,49 @@ def qa_node(state: AgentState) -> dict:
 
     # ── Return to Developer if iterations remain ──────────────────────────────
     if iteration + 1 < max_iterations:
+        # Senior mode: pause and ask the human before routing back to developer.
+        # This lets them review QA findings and optionally inject instructions.
+        mode = state.get("mode", "senior")
+        clarification_callback = state.get("clarification_callback")
+        if mode == "senior" and clarification_callback is not None:
+            _summary_lines = "\n".join(
+                f"- [{i.severity}] {i.file}: {i.description[:120]}"
+                for i in all_qa_issues[:8]
+            )
+            _review_prompt = (
+                "QA iteration review: "  # sentinel prefix for service routing
+                f"QA found {len(all_qa_issues)} issue(s) "
+                f"({critical_total} critical / {major_total} major / {minor_total} minor).\n\n"
+                f"{_summary_lines}\n\n"
+                "Reply 'proceed' to let the developer fix these automatically, "
+                "or type additional instructions to inject."
+            )
+            _log(
+                {
+                    "agent": "qa",
+                    "phase": "iteration_review",
+                    "content": f"Senior review checkpoint: {len(all_qa_issues)} issue(s) found. Waiting for human.",
+                }
+            )
+            human_input = (clarification_callback(_review_prompt, ["proceed | Let developer fix automatically"]) or "").strip()
+            if human_input and human_input.lower() not in ("proceed", ""):
+                # Queue the instruction for the developer's next iteration
+                _log(
+                    {
+                        "agent": "qa",
+                        "phase": "iteration_review",
+                        "content": f"Senior instruction queued: {human_input[:120]}",
+                    }
+                )
+                return {
+                    "qa_passed": False,
+                    "qa_feedback": qa_feedback,
+                    "qa_issues": [i.model_dump() for i in all_qa_issues],
+                    "iteration": iteration + 1,
+                    "senior_prompt_queue": [human_input],
+                    "reasoning_logs": reasoning_logs,
+                }
+
         print(
             f"[AI-DLC] Fix instructions dispatched to Developer (iteration {iteration + 1}/{max_iterations}).\n"
         )

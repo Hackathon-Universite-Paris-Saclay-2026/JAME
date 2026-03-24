@@ -965,3 +965,42 @@ textarea:disabled { opacity: 0.5; cursor: not-allowed; }
   gap: 6px;
   flex-wrap: wrap;
 }
+
+/* ── Iteration Review Card (senior mode QA checkpoint) ───────────────── */
+.iter-review-card {
+  margin: 8px 12px;
+  padding: 12px 14px;
+  background: #1a2a1a;
+  border: 1px solid #2a6a2a;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.iter-review-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #6abf6a;
+}
+
+.iter-review-icon { font-size: 14px; }
+.iter-review-title { letter-spacing: 0.03em; }
+
+.iter-review-body {
+  font-size: 12px;
+  color: #c9d1d9;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.iter-review-instr-row { display: flex; flex-direction: column; }
+
+.iter-review-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}

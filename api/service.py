@@ -159,9 +159,10 @@ class OrchestratorService:
         )
         return hint
 
-    # Sentinel prefix that architect_node uses to mark specs review questions
-    # so the service can emit a dedicated specs_review_request event.
+    # Sentinel prefix that architect_node uses to mark specs review questions.
     _SPECS_REVIEW_PREFIX = "Please review the generated specifications."
+    # Sentinel prefix that qa_node uses to mark senior iteration review questions.
+    _ITERATION_REVIEW_PREFIX = "QA iteration review:"
 
     async def _request_clarification(
         self, run_id: str, question: str, options: list[str]
@@ -180,6 +181,27 @@ class OrchestratorService:
             return await asyncio.wait_for(future, timeout=300.0)
         except TimeoutError:
             return ""
+
+    async def _request_iteration_review(
+        self, run_id: str, question: str, options: list[str]
+    ) -> str:
+        """Emit an iteration_review_request event and await the human's proceed/instruction answer.
+
+        Uses the same clarification future so the existing /clarify endpoint resolves it.
+        """
+        future = self.store.request_clarification(run_id)
+        await self._emit(
+            run_id,
+            "iteration_review_request",
+            question,
+            agent="qa",
+            phase="iteration_review",
+            payload={"question": question, "options": options},
+        )
+        try:
+            return await asyncio.wait_for(future, timeout=300.0)
+        except TimeoutError:
+            return "proceed"
 
     async def _request_specs_review(
         self, run_id: str, question: str, options: list[str]
@@ -278,12 +300,13 @@ class OrchestratorService:
             question: str, options: list[str] | None = None
         ) -> str:
             if svc.store.has_subscribers(run_id):
-                # Route specs review questions to the dedicated event type
-                is_specs_review = question.startswith(
-                    svc._SPECS_REVIEW_PREFIX
-                )
-                if is_specs_review:
+                # Route to the correct event type based on sentinel prefix
+                if question.startswith(svc._SPECS_REVIEW_PREFIX):
                     coro = svc._request_specs_review(
+                        run_id, question, options or []
+                    )
+                elif question.startswith(svc._ITERATION_REVIEW_PREFIX):
+                    coro = svc._request_iteration_review(
                         run_id, question, options or []
                     )
                 else:

@@ -924,18 +924,19 @@ def developer_node(state: AgentState) -> dict:
     }
     mode_note = mode_preambles.get(mode, mode_preambles["senior"])
 
-    # Consume queued senior instructions — prepend to specs context for this iteration.
+    # Consume queued instructions — prepend to specs context for this iteration.
+    # Available to all modes: any human can inject instructions via the queue.
     senior_queue: list[str] = list(state.get("senior_prompt_queue", []))
     senior_instructions = ""
-    if senior_queue and mode == "senior":
-        senior_instructions = "\n\n## Senior developer instructions (queued by user):\n" + "\n".join(
+    if senior_queue:
+        senior_instructions = "\n\n## Developer instructions (queued by user):\n" + "\n".join(
             f"- {p}" for p in senior_queue
         )
         _log(
             {
                 "agent": "developer",
                 "phase": "plan",
-                "content": f"Applying {len(senior_queue)} queued senior instruction(s).",
+                "content": f"Applying {len(senior_queue)} queued instruction(s).",
             }
         )
 
