@@ -15,7 +15,7 @@ import uuid
 from pydantic import BaseModel
 
 from cancel_token import CancelToken, RunCancelledError, set_current_token
-from graph.graph import build_graph
+from graph.graph import build_graph, build_graph_from
 from graph.nodes.validator_node import validate_submission as _validate
 from graph.state import AgentState
 from utils.node import finalize_artifacts
@@ -52,9 +52,274 @@ class OrchestratorService:
         self._track_task(task)
         return run_id
 
+    async def _finalize_run(
+        self, run_id: str, run_output_dir: Path, final_state: AgentState
+    ) -> None:
+        """Persist artifacts, store result, and emit the terminal event."""
+        output_dir = str(run_output_dir / "output")
+        finalize_artifacts(final_state, output_dir)
+
+        project_dir = (run_output_dir / "output" / "project").resolve()
+        generated_files: list[str] = []
+        if final_state.get("mode") != "junior":
+            for code_file in final_state.get("code_files", []):
+                rel_path = (
+                    code_file.get("path", "")
+                    if isinstance(code_file, dict)
+                    else code_file.path
+                )
+                if rel_path:
+                    generated_files.append(str((project_dir / rel_path).resolve()))
+
+        serialisable_state = {
+            k: v
+            for k, v in final_state.items()
+            if k not in ("clarification_callback", "emit_callback", "tool_call_callback")
+        }
+        result = {
+            "qa_passed": final_state.get("qa_passed", False),
+            "qa_feedback": final_state.get("qa_feedback", ""),
+            "reasoning_logs": final_state.get("reasoning_logs", []),
+            "output_dir": str((run_output_dir / "output").resolve()),
+            "project_dir": str(project_dir),
+            "generated_files": generated_files,
+            "state": json.loads(
+                json.dumps(serialisable_state, default=_pydantic_encoder)
+            ),
+        }
+        self.store.set_result(run_id, result)
+
+        if final_state.get("mode") == "junior" and final_state.get("exercise_files"):
+            self.store.update_status(run_id, RunStatus.AWAITING_SUBMISSION)
+            await self._emit(
+                run_id,
+                "awaiting_submission",
+                "Pipeline complete — waiting for your implementation.",
+                payload={
+                    "learning_objectives": final_state.get("learning_objectives", []),
+                    "hints_available": len(final_state.get("hints", [])),
+                },
+            )
+            return
+
+        self.store.update_status(run_id, RunStatus.SUCCEEDED)
+        await self._emit(
+            run_id,
+            "run_completed",
+            "Build completed successfully!",
+            payload={
+                "output_dir": result["output_dir"],
+                "project_dir": result["project_dir"],
+                "generated_files": result["generated_files"],
+                "qa_passed": result["qa_passed"],
+            },
+        )
+
     def cancel_run(self, run_id: str) -> bool:
         """Request cancellation of a running pipeline."""
         return self.store.cancel_run(run_id)
+
+    @staticmethod
+    def _detect_resume_node(state: dict) -> str:
+        """Detect the earliest node that did not complete based on saved state.
+
+        Inspects which outputs are populated to determine the last successful
+        node, and returns the *next* node that should run.
+
+        Returns:
+            Node name to resume from: one of architect / developer / qa / devops.
+        """
+        # If code_files exist, developer completed — resume from qa
+        if state.get("code_files"):
+            # If qa_passed is True or qa_feedback exists, qa completed — resume from devops
+            if state.get("qa_passed") or state.get("qa_feedback"):
+                return "devops"
+            return "qa"
+        # If specs exist, architect completed — resume from developer
+        if state.get("specs"):
+            return "developer"
+        # Nothing completed — start fresh from architect
+        return "architect"
+
+    async def resume_run(self, run_id: str) -> str | None:
+        """Resume a failed run from the last successful checkpoint.
+
+        Reconstructs the pipeline state from the saved snapshot and re-runs
+        the graph starting from the node that failed.
+
+        Args:
+            run_id: ID of the failed run.
+
+        Returns:
+            The new run_id for the resumed run, or None if the run is not resumable.
+        """
+        record = self.store.get_run(run_id)
+        if record is None or record.status != RunStatus.FAILED:
+            return None
+        saved_state = record.result.get("state")
+        if not saved_state:
+            return None
+
+        entry_node = self._detect_resume_node(saved_state)
+        new_run_id = str(uuid.uuid4())
+
+        # Create a new record linked to the same request
+        self.store.create_run(new_run_id, record.request)
+
+        asyncio.create_task(
+            self._run_pipeline_resume(new_run_id, record.request, saved_state, entry_node)
+        )
+        return new_run_id
+
+    async def _run_pipeline_resume(
+        self,
+        run_id: str,
+        request: RunCreateRequest,
+        saved_state: dict,
+        entry_node: str,
+    ) -> None:
+        """Run the pipeline from *entry_node* using *saved_state* as the starting point."""
+        self.store.update_status(run_id, RunStatus.RUNNING)
+        await self._emit(
+            run_id,
+            "run_started",
+            f"Resuming from {entry_node}…",
+        )
+
+        token = CancelToken()
+        chunk_queue: asyncio.Queue = asyncio.Queue()
+        self.store.register_token(run_id, token, chunk_queue)
+        if self.store.is_cancelled(run_id):
+            token.cancel()
+            chunk_queue.put_nowait(("cancelled", None))
+
+        loop = asyncio.get_running_loop()
+        clarify_fn = self._make_clarify_fn(run_id, loop)
+        emit_fn = self._make_emit_fn(run_id, loop)
+        tool_call_fn = self._make_tool_call_fn(run_id, loop)
+
+        run_output_dir = (self.output_root / run_id).resolve()
+        run_output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Reconstruct AgentState from snapshot, injecting fresh callbacks
+        resume_state: AgentState = {
+            **saved_state,  # type: ignore[misc]
+            "run_output_dir": str(run_output_dir),
+            "clarification_callback": clarify_fn,
+            "emit_callback": emit_fn,
+            "tool_call_callback": tool_call_fn,
+            "reasoning_logs": [],  # fresh trace for this resumed run
+            "max_iterations": request.max_iterations,
+        }
+
+        final_state: AgentState = resume_state
+
+        def _run_graph_sync() -> None:
+            set_current_token(token)
+            graph = build_graph_from(entry_node)
+            try:
+                for chunk in graph.stream(resume_state, stream_mode="updates"):
+                    loop.call_soon_threadsafe(
+                        chunk_queue.put_nowait, ("chunk", chunk)
+                    )
+            except RunCancelledError:
+                loop.call_soon_threadsafe(chunk_queue.put_nowait, ("cancelled", None))
+            except Exception as exc:
+                loop.call_soon_threadsafe(chunk_queue.put_nowait, ("error", exc))
+            else:
+                loop.call_soon_threadsafe(chunk_queue.put_nowait, ("done", None))
+
+        # Reuse the same chunk-processing loop as _run_pipeline by delegating
+        # — simplest: just duplicate the await loop inline (it's self-contained)
+        try:
+            graph_task = asyncio.create_task(asyncio.to_thread(_run_graph_sync))
+
+            while True:
+                kind, payload = await chunk_queue.get()
+
+                if kind == "cancelled":
+                    await self._emit(run_id, "run_cancelled", "Build cancelled by user.")
+                    self.store.update_status(run_id, RunStatus.CANCELLED)
+                    return
+
+                if kind == "error":
+                    self._raise_pipeline_error(payload)
+
+                if kind == "done":
+                    break
+
+                chunk = payload
+                for node_name, node_update in chunk.items():
+                    if not isinstance(node_update, dict):
+                        continue
+                    final_state = self._merge_state(final_state, node_update)
+
+                    if node_name == "architect":
+                        diagrams = node_update.get("diagrams", "")
+                        specs = node_update.get("specs", "")
+                        if diagrams or specs:
+                            await self._emit(
+                                run_id=run_id,
+                                event="architect_done",
+                                message="Architecture design complete.",
+                                agent="architect",
+                                phase="design",
+                                payload={
+                                    "specs": specs,
+                                    "diagrams": diagrams,
+                                    "scope": node_update.get("scope", ""),
+                                },
+                            )
+
+                    if node_name == "developer" and node_update.get("code_files"):
+                        dev_files = node_update["code_files"]
+                        project_dir_node = (run_output_dir / "output" / "project").resolve()
+                        emitted_paths: list[str] = []
+                        for cf in dev_files:
+                            p = cf.get("path", "") if isinstance(cf, dict) else cf.path
+                            if p:
+                                emitted_paths.append(str(project_dir_node / p))
+                        await self._emit(
+                            run_id=run_id,
+                            event="files_ready",
+                            message=f"{len(emitted_paths)} file(s) ready",
+                            payload={
+                                "generated_files": emitted_paths,
+                                "project_dir": str(project_dir_node),
+                            },
+                        )
+
+            await self._finalize_run(run_id, run_output_dir, final_state)
+
+        except Exception as exc:
+            error_msg = f"{exc!s}\n{traceback.format_exc()}"
+            print(f"[ERROR] Resumed run {run_id} failed: {error_msg}", file=sys.stderr)
+            if final_state:
+                serialisable_state = {
+                    k: v
+                    for k, v in final_state.items()
+                    if k not in ("clarification_callback", "emit_callback", "tool_call_callback")
+                }
+                self.store.set_result(
+                    run_id,
+                    {
+                        "state": json.loads(json.dumps(serialisable_state, default=_pydantic_encoder)),
+                        "output_dir": str((run_output_dir / "output").resolve()),
+                        "project_dir": str((run_output_dir / "output" / "project").resolve()),
+                        "reasoning_logs": final_state.get("reasoning_logs", []),
+                        "resumable": True,
+                    },
+                )
+            self.store.set_error(run_id, str(exc))
+            await self._emit(
+                run_id,
+                "run_failed",
+                f"Build failed: {exc!s}",
+                payload={"error": error_msg, "resumable": bool(final_state)},
+            )
+        finally:
+            if not graph_task.done():
+                graph_task.cancel()
 
     async def validate_submission(
         self, run_id: str, submitted_files: list[dict]
@@ -746,85 +1011,43 @@ class OrchestratorService:
                                     },
                                 )
 
-            # Finalise dynamic artifacts (qa_issues, reasoning trace, git init).
-            # All file artifacts were written incrementally by each node.
-            output_dir = str(run_output_dir / "output")
-            finalize_artifacts(final_state, output_dir)
-
-            project_dir = (run_output_dir / "output" / "project").resolve()
-            generated_files: list[str] = []
-            if final_state.get("mode") != "junior":
-                for code_file in final_state.get("code_files", []):
-                    rel_path = (
-                        code_file.get("path", "")
-                        if isinstance(code_file, dict)
-                        else code_file.path
-                    )
-                    if rel_path:
-                        generated_files.append(
-                            str((project_dir / rel_path).resolve())
-                        )
-
-            # Exclude non-serialisable fields before JSON-encoding the state
-            serialisable_state = {
-                k: v
-                for k, v in final_state.items()
-                if k != "clarification_callback"
-            }
-            result = {
-                "qa_passed": final_state.get("qa_passed", False),
-                "qa_feedback": final_state.get("qa_feedback", ""),
-                "reasoning_logs": final_state.get("reasoning_logs", []),
-                "output_dir": str((run_output_dir / "output").resolve()),
-                "project_dir": str(project_dir),
-                "generated_files": generated_files,
-                "state": json.loads(
-                    json.dumps(serialisable_state, default=_pydantic_encoder)
-                ),
-            }
-
-            self.store.set_result(run_id, result)
-
-            # Learning mode: pause and wait for junior's submission
-            if final_state.get("mode") == "junior" and final_state.get(
-                "exercise_files"
-            ):
-                self.store.update_status(run_id, RunStatus.AWAITING_SUBMISSION)
-                await self._emit(
-                    run_id,
-                    "awaiting_submission",
-                    "Pipeline complete — waiting for your implementation.",
-                    payload={
-                        "learning_objectives": final_state.get(
-                            "learning_objectives", []
-                        ),
-                        "hints_available": len(final_state.get("hints", [])),
-                    },
-                )
-                return
-
-            self.store.update_status(run_id, RunStatus.SUCCEEDED)
-            await self._emit(
-                run_id,
-                "run_completed",
-                "Build completed successfully!",
-                payload={
-                    "output_dir": result["output_dir"],
-                    "project_dir": result["project_dir"],
-                    "generated_files": result["generated_files"],
-                    "qa_passed": result["qa_passed"],
-                },
-            )
+            await self._finalize_run(run_id, run_output_dir, final_state)
 
         except Exception as exc:
             error_msg = f"{exc!s}\n{traceback.format_exc()}"
             print(f"[ERROR] Run {run_id} failed: {error_msg}", file=sys.stderr)
+            # Snapshot the partial state so the run can be resumed later
+            if final_state:
+                serialisable_state = {
+                    k: v
+                    for k, v in final_state.items()
+                    if k
+                    not in (
+                        "clarification_callback",
+                        "emit_callback",
+                        "tool_call_callback",
+                    )
+                }
+                self.store.set_result(
+                    run_id,
+                    {
+                        "state": json.loads(
+                            json.dumps(serialisable_state, default=_pydantic_encoder)
+                        ),
+                        "output_dir": str((run_output_dir / "output").resolve()),
+                        "project_dir": str(
+                            (run_output_dir / "output" / "project").resolve()
+                        ),
+                        "reasoning_logs": final_state.get("reasoning_logs", []),
+                        "resumable": True,
+                    },
+                )
             self.store.set_error(run_id, str(exc))
             await self._emit(
                 run_id,
                 "run_failed",
                 f"Build failed: {exc!s}",
-                payload={"error": error_msg},
+                payload={"error": error_msg, "resumable": bool(final_state)},
             )
         finally:
             if not graph_task.done():

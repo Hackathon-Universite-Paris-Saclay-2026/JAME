@@ -285,6 +285,35 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
         return;
       }
 
+      if (msg.command === "resumeRun") {
+        const backendUrlForResume = this.resolvedBackendUrl ?? vscode.workspace
+          .getConfiguration()
+          .get<string>("jameWorkflow.backendUrl", "http://localhost:8000");
+        const fetchFnResume = (globalThis as { fetch?: (input: string, init?: unknown) => Promise<any> }).fetch;
+        if (fetchFnResume && msg.runId) {
+          try {
+            const resp = await fetchFnResume(`${backendUrlForResume}/runs/${msg.runId}/resume`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+            });
+            if (resp.ok) {
+              const body = await resp.json();
+              const newRunId: string = body.run_id;
+              this.view?.webview.postMessage({ command: "runResumed", runId: newRunId });
+            } else {
+              const errBody = await resp.json().catch(() => ({}));
+              this.view?.webview.postMessage({
+                command: "resumeFailed",
+                error: errBody.detail ?? "Resume failed",
+              });
+            }
+          } catch (e) {
+            this.view?.webview.postMessage({ command: "resumeFailed", error: String(e) });
+          }
+        }
+        return;
+      }
+
       if (msg.command === "submitExercise") {
         const backendUrlForSubmit = this.resolvedBackendUrl ?? vscode.workspace
           .getConfiguration()

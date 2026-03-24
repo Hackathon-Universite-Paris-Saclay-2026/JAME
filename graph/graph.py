@@ -52,6 +52,56 @@ def _should_retry_or_continue(state: AgentState) -> str:
     return "developer"
 
 
+_RESUME_NODES = ("architect", "developer", "qa", "devops", "exercise_generator")
+
+
+def build_graph_from(entry_node: str) -> StateGraph:
+    """Construct a compiled graph that starts from *entry_node* instead of architect.
+
+    Used for resuming a failed run from the last successful checkpoint.
+
+    Args:
+        entry_node: One of the pipeline node names (e.g. ``"developer"``).
+
+    Returns:
+        A compiled ``StateGraph`` with the custom entry point.
+    """
+    if entry_node not in _RESUME_NODES:
+        raise ValueError(f"Unknown resume node: {entry_node!r}")
+
+    workflow = StateGraph(AgentState)
+
+    workflow.add_node("architect", architect_node)
+    workflow.add_node("developer", developer_node)
+    workflow.add_node("qa", qa_node)
+    workflow.add_node("devops", devops_node)
+    workflow.add_node("exercise_generator", exercise_generator_node)
+
+    workflow.set_entry_point(entry_node)
+
+    # Always wire developer → qa and qa → developer loop (qa can retry developer).
+    # Even when resuming from qa, the retry loop must be available.
+    workflow.add_edge("developer", "qa")
+    workflow.add_conditional_edges(
+        "qa",
+        _should_retry_or_continue,
+        {"developer": "developer", "devops": "devops"},
+    )
+
+    # Edges only needed when architect is the entry node
+    if entry_node == "architect":
+        workflow.add_edge("architect", "developer")
+
+    workflow.add_conditional_edges(
+        "devops",
+        lambda s: "exercise_generator" if s.get("mode") == "junior" else END,
+        {"exercise_generator": "exercise_generator", END: END},
+    )
+    workflow.add_edge("exercise_generator", END)
+
+    return workflow.compile()
+
+
 def build_graph() -> StateGraph:
     """Construct and compile the multi-agent LangGraph workflow.
 

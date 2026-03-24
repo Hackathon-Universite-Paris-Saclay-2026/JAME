@@ -91,9 +91,7 @@ modeBadgeEl.addEventListener('click', () => {
 // Slash command registry
 const SLASH_COMMANDS = [
   { name: '/mode',    desc: 'Switch mode for this chat' },
-  { name: '/fix',     desc: 'Ask the agent to fix an issue in generated code' },
-  { name: '/explain', desc: 'Explain the last generated code or output' },
-  { name: '/retry',   desc: 'Retry the last failed build' },
+  { name: '/resume',  desc: 'Resume the last failed run from its checkpoint' },
   { name: '/clear',   desc: 'Clear conversation and start fresh' },
   { name: '/fun',     desc: 'Toggle the spirit of JAME' },
   { name: '/logs',    desc: 'Show backend output in the VS Code panel' },
@@ -1360,6 +1358,22 @@ function send() {
     return;
   }
 
+  // /resume — resume the last failed run automatically, no new run needed
+  if (slashCmd === '/resume') {
+    inputEl.value = '';
+    inputEl.style.height = 'auto';
+    clearSlashCommand();
+    closeSuggestions();
+    if (!currentRunId) {
+      addSysMsg('No previous run to resume.', 'warn');
+      return;
+    }
+    addUserMessage('/resume');
+    setRunning(true);
+    vscode.postMessage({ command: 'resumeRun', runId: currentRunId });
+    return;
+  }
+
   generatedFiles = [];
   projectDir = null;
   currentIteration = 0;
@@ -1394,6 +1408,22 @@ const _EXERCISE_ICON_SVG =
   '</svg>';
 
 let _exerciseBarSubmitBtn = null;
+
+function showResumeCard(failedRunId) {
+  breakAgentGroup();
+  const card = document.createElement('div');
+  card.className = 'resume-card';
+  card.innerHTML =
+    '<span class="resume-icon">&#9881;</span>' +
+    '<span class="resume-msg">The run failed. Resume from the last checkpoint?</span>' +
+    '<button class="resume-btn btn btn-primary">Resume</button>';
+  card.querySelector('.resume-btn').addEventListener('click', () => {
+    card.remove();
+    vscode.postMessage({ command: 'resumeRun', runId: failedRunId });
+  });
+  feed.appendChild(card);
+  scrollFeed();
+}
 
 function showSubmitExerciseCard(objectives) {
   const bar = document.getElementById('exerciseBar');
@@ -1658,6 +1688,31 @@ window.addEventListener('message', async (event) => {
     return;
   }
 
+  if (msg.command === 'runResumed') {
+    currentRunId = msg.runId;
+    addSysMsg('Resuming run [' + msg.runId.substring(0, 8) + ']', 'info');
+    setRunning(true);
+
+    const effectiveUrl = window._resolvedBackendUrl;
+    const wsUrl = effectiveUrl
+      .replace('http://', 'ws://')
+      .replace('https://', 'wss://') + '/ws/runs/' + msg.runId;
+
+    ws = new WebSocket(wsUrl);
+    ws.onmessage = (evt) => {
+      let data;
+      try { data = JSON.parse(evt.data); } catch (e) { return; }
+      try { handleServerEvent(data); } catch (e) { console.error('[JAME] event error', e); }
+    };
+    ws.onerror = () => addSysMsg('WebSocket error on resumed run.', 'err');
+    return;
+  }
+
+  if (msg.command === 'resumeFailed') {
+    addSysMsg('Resume failed: ' + (msg.error || 'unknown error'), 'err');
+    return;
+  }
+
   if (msg.command === 'runCreated') {
     currentRunId = msg.runId;
     addSysMsg('Run started [' + msg.runId.substring(0, 8) + ']', 'info');
@@ -1802,31 +1857,36 @@ function handleServerEvent(data) {
       return;
     }
 
-    // Architect design streaming: update a single live row with char count
+    // Architect design streaming: update a single live row with char count.
+    // Only intercept the periodic "Designing… N chars" progress pulses.
+    // Final summary rows (carry thinking or "c specs" summary text) fall through
+    // to addTlRow so the thinking toggle is rendered correctly.
     if (rawAgent === 'architect' && (phase === 'act' || payload.phase === 'act')) {
-      // Extract char count from progress message "Designing… N chars"
-      const match = msg.match(/(\d+)\s*chars/);
-      if (match) _architectStreamBuf = match[1];
-      if (!_architectStreamRow) {
-        if (!_currentAgentGroup || _lastRowAc !== 'ac-architect') {
-          _currentAgentGroup = document.createElement('div');
-          _currentAgentGroup.className = 'agent-group ac-architect fade-in';
-          feed.appendChild(_currentAgentGroup);
-          _lastRowAc = 'ac-architect';
+      const match = msg.match(/^Designing\u2026\s*(\d+)\s*chars$/);
+      if (match) {
+        _architectStreamBuf = match[1];
+        if (!_architectStreamRow) {
+          if (!_currentAgentGroup || _lastRowAc !== 'ac-architect') {
+            _currentAgentGroup = document.createElement('div');
+            _currentAgentGroup.className = 'agent-group ac-architect fade-in';
+            feed.appendChild(_currentAgentGroup);
+            _lastRowAc = 'ac-architect';
+          }
+          const row = document.createElement('div');
+          row.className = 'agent-row same-agent';
+          row.innerHTML =
+            '<span class="ar-tag">ARCH</span>' +
+            '<span class="ar-phase phase-act">act</span>' +
+            '<span class="ar-msg ar-stream-msg">Designing architecture\u2026 <span class="ar-stream-count">0</span> chars</span>';
+          _currentAgentGroup.appendChild(row);
+          _architectStreamRow = row;
         }
-        const row = document.createElement('div');
-        row.className = 'agent-row same-agent';
-        row.innerHTML =
-          '<span class="ar-tag">ARCH</span>' +
-          '<span class="ar-phase phase-act">act</span>' +
-          '<span class="ar-msg ar-stream-msg">Designing architecture\u2026 <span class="ar-stream-count">0</span> chars</span>';
-        _currentAgentGroup.appendChild(row);
-        _architectStreamRow = row;
+        const counter = _architectStreamRow.querySelector('.ar-stream-count');
+        if (counter) counter.textContent = match[1];
+        scrollFeed();
+        return;
       }
-      const counter = _architectStreamRow.querySelector('.ar-stream-count');
-      if (counter && match) counter.textContent = match[1];
-      scrollFeed();
-      return;
+      // Not a progress pulse — fall through to addTlRow (handles thinking toggle etc.)
     }
 
     if (!msg) return;
@@ -1953,9 +2013,13 @@ function handleServerEvent(data) {
   if (event === 'run_failed') {
     const err = (data.payload && data.payload.error) || data.message || 'Unknown error';
     const firstLine = err.split('\n')[0];
+    const resumable = !!(data.payload && data.payload.resumable);
     addSysMsg('Build failed: ' + firstLine, 'err');
     setRunning(false);
     if (ws) ws.close();
+    if (resumable && currentRunId) {
+      showResumeCard(currentRunId);
+    }
     return;
   }
 

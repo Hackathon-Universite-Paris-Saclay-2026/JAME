@@ -14,6 +14,7 @@ from .models import (
     QueuePromptRequest,
     RunCreateRequest,
     RunCreateResponse,
+    RunStatus,
     RunStatusResponse,
     SpecsReviewRequest,
     SubmitRequest,
@@ -125,6 +126,29 @@ async def tool_response(
             detail="No pending tool_call with that id for this run.",
         )
     return {"status": "tool_response_received", "action": request.action}
+
+
+@app.post("/runs/{run_id}/resume", response_model=RunCreateResponse)
+async def resume_run(run_id: str) -> RunCreateResponse:
+    """Resume a failed run from the last successful checkpoint.
+
+    Creates a new run that starts from the node where the previous run failed,
+    reusing all state (specs, code_files, etc.) that was already generated.
+    """
+    record = service.store.get_run(run_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found.")
+    if record.status != RunStatus.FAILED:
+        raise HTTPException(
+            status_code=409, detail="Only failed runs can be resumed."
+        )
+    new_run_id = await service.resume_run(run_id)
+    if new_run_id is None:
+        raise HTTPException(
+            status_code=409, detail="Run has no saved state to resume from."
+        )
+    new_record = service.store.get_run(new_run_id)
+    return RunCreateResponse(run_id=new_run_id, status=new_record.status)
 
 
 @app.post("/runs/{run_id}/cancel")

@@ -925,6 +925,23 @@ textarea:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 .fade-in { animation: fadeSlideIn 0.25s ease forwards; }
 
+/* ── Resume Card ──────────────────────────────────────────────────────── */
+.resume-card {
+  margin: 8px 12px;
+  padding: 10px 14px;
+  background: #2a1a1a;
+  border: 1px solid #6a2a2a;
+  border-left: 3px solid #c04040;
+  border-radius: 5px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+}
+.resume-icon { font-size: 14px; }
+.resume-msg { flex: 1; color: #e0b0b0; }
+.resume-btn { white-space: nowrap; }
+
 /* ── Diagrams Card ────────────────────────────────────────────────────── */
 .diagrams-card {
   margin: 8px 12px;
