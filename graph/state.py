@@ -238,6 +238,7 @@ class AgentState(TypedDict):
         Any  # callable(question, options) -> answer (not serialised)
     )
     emit_callback: Any  # callable(log_dict) -> None — fires immediately for real-time streaming (not serialised)
+    tool_call_callback: Any  # callable(tool_call_id, tool_name, command, args) -> "run"|"skip" (not serialised)
     reasoning_logs: Annotated[
         list[ReasoningEntry], operator.add
     ]  # append-only trace

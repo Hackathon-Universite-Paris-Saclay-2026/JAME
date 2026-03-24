@@ -24,8 +24,14 @@ Security rules enforced (AI-DLC security baseline):
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from functools import partial
 import json
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import uuid
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage
@@ -111,8 +117,19 @@ def _triage(
     return priority_map
 
 
+def _format_tool_output(tool_issues: list[QAIssue]) -> str:
+    """Render tool issues as a readable block for prompt injection."""
+    if not tool_issues:
+        return "No tool issues found."
+    return "\n".join(f"- [{i.severity}] {i.description}" for i in tool_issues)
+
+
 def _analyse_file(
-    llm: BaseChatModel, specs: str, code_file: CodeFile, priority: str
+    llm: BaseChatModel,
+    specs: str,
+    code_file: CodeFile,
+    priority: str,
+    tool_issues: list[QAIssue] | None = None,
 ) -> dict:
     """AI-DLC Static Review — single file analysis."""
     print(f"[REVIEW] {code_file.path} [{priority}] …")
@@ -125,6 +142,7 @@ def _analyse_file(
                     file_path=code_file.path,
                     language=code_file.language,
                     content=code_file.content,
+                    tool_output=_format_tool_output(tool_issues or []),
                 )
             )
         ]
@@ -186,7 +204,11 @@ def _cross_file_check(
 
 
 def _generate_fix_instructions(
-    llm: BaseChatModel, specs: str, code_file: CodeFile, issues: list[dict]
+    llm: BaseChatModel,
+    specs: str,
+    code_file: CodeFile,
+    issues: list[dict],
+    tool_issues: list[QAIssue] | None = None,
 ) -> str:
     """AI-DLC Fix — patch instructions or full rewrite brief."""
     critical_count = sum(1 for i in issues if i.get("severity") == "critical")
@@ -225,6 +247,7 @@ def _generate_fix_instructions(
                 HumanMessage(
                     content=PATCH_INSTRUCTIONS_PROMPT.format(
                         file_path=code_file.path,
+                        tool_output=_format_tool_output(tool_issues or []),
                         issues=issues_text,
                         language=code_file.language,
                         content=code_file.content,
@@ -323,6 +346,183 @@ def _collect_qa_issues(
     return issues
 
 
+# ── Tool-based checks ─────────────────────────────────────────────────────────
+
+
+class ToolSkippedError(Exception):
+    """Raised when the user chooses to skip a tool — QA stops immediately."""
+
+
+def _ask_tool(
+    tool_call_fn: Callable | None,
+    tool_call_id: str,
+    tool_name: str,
+    command: str,
+    args: list[str],
+) -> str:
+    """Ask the user whether to run or skip a tool.
+
+    Falls back to always-run when no callback is configured (CLI / test mode).
+    """
+    if tool_call_fn is None:
+        return "run"
+    return tool_call_fn(tool_call_id, tool_name, command, args)
+
+
+def _run_tool_checks(
+    code_files: list[CodeFile],
+    project_dir: Path,
+    tool_call_fn: Callable | None,
+    log: Callable[[dict], None],
+) -> list[QAIssue]:
+    """Write code files to *project_dir*, then run ruff and pytest.
+
+    For each tool the user is asked Run / Skip before execution:
+    - Run  → execute; failures become QAIssue entries.
+    - Skip → raises ToolSkippedError, QA stops immediately with FAIL.
+
+    Returns a (possibly empty) list of QAIssue detected by the tools.
+    If both tools pass the list is empty and the caller can short-circuit to PASS.
+    """
+    # Write all files to project_dir so tools can find them
+    python_files: list[Path] = []
+    test_files: list[Path] = []
+    for cf in code_files:
+        dest = project_dir / cf.path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(cf.content, encoding="utf-8")
+        if cf.language == "python" or cf.path.endswith(".py"):
+            python_files.append(dest)
+            if cf.path.startswith("test") or "/test" in cf.path:
+                test_files.append(dest)
+
+    issues: list[QAIssue] = []
+
+    # ── ruff ──────────────────────────────────────────────────────────────────
+    ruff_bin = shutil.which("ruff") or sys.executable.replace("python", "ruff")
+    ruff_args = ["check", "--output-format=json", str(project_dir)]
+    ruff_id = str(uuid.uuid4())
+
+    print(f"\n[TOOL] ruff check {project_dir}")
+    action = _ask_tool(tool_call_fn, ruff_id, "ruff", ruff_bin, ruff_args)
+    if action == "skip":
+        raise ToolSkippedError("ruff")
+
+    log({"agent": "qa", "phase": "act", "content": "Running ruff…"})
+    result = subprocess.run(  # noqa: S603
+        [ruff_bin, *ruff_args],
+        capture_output=True,
+        text=True,
+        cwd=str(project_dir),
+    )
+    ruff_output = result.stdout.strip()
+    log(
+        {
+            "agent": "qa",
+            "phase": "act",
+            "content": f"ruff exit={result.returncode}",
+            "tool_result": {
+                "tool_name": "ruff",
+                "exit_code": result.returncode,
+                "output": ruff_output or result.stderr.strip(),
+            },
+        }
+    )
+
+    if result.returncode != 0:
+        try:
+            diagnostics = json.loads(ruff_output) if ruff_output else []
+        except json.JSONDecodeError:
+            diagnostics = []
+
+        if diagnostics:
+            for d in diagnostics:
+                loc = d.get("location", {})
+                line = loc.get("row", "?")
+                issues.append(
+                    QAIssue(
+                        file=d.get("filename", "UNKNOWN"),
+                        severity="major",
+                        description=f"[ruff] {d.get('code', '?')} line {line}: {d.get('message', '')}",
+                    )
+                )
+        else:
+            # ruff emitted non-JSON (e.g. format warnings) — surface as one issue
+            issues.append(
+                QAIssue(
+                    file=str(project_dir),
+                    severity="major",
+                    description=f"[ruff] {(ruff_output or result.stderr).strip()[:400]}",
+                )
+            )
+        print(f"    ⚠️  ruff: {len(issues)} issue(s)")
+    else:
+        print("    ✅ ruff: no issues")
+
+    # ── pytest ─────────────────────────────────────────────────────────────────
+    pytest_bin = shutil.which("pytest") or "pytest"
+    pytest_args = [str(project_dir), "-v", "--tb=short", "--no-header"]
+    pytest_id = str(uuid.uuid4())
+
+    print(f"\n[TOOL] pytest {project_dir}")
+    action = _ask_tool(
+        tool_call_fn, pytest_id, "pytest", pytest_bin, pytest_args
+    )
+    if action == "skip":
+        raise ToolSkippedError("pytest")
+
+    log({"agent": "qa", "phase": "act", "content": "Running pytest…"})
+    result = subprocess.run(  # noqa: S603
+        [pytest_bin, *pytest_args],
+        capture_output=True,
+        text=True,
+        cwd=str(project_dir),
+    )
+    pytest_output = (result.stdout + result.stderr).strip()
+    log(
+        {
+            "agent": "qa",
+            "phase": "act",
+            "content": f"pytest exit={result.returncode}",
+            "tool_result": {
+                "tool_name": "pytest",
+                "exit_code": result.returncode,
+                "output": pytest_output,
+            },
+        }
+    )
+
+    if result.returncode != 0:
+        # Extract failed test names from pytest output
+        failed_lines = [
+            line
+            for line in pytest_output.splitlines()
+            if line.startswith("FAILED") or "ERROR" in line
+        ]
+        if failed_lines:
+            for line in failed_lines[:20]:
+                issues.append(
+                    QAIssue(
+                        file=str(project_dir),
+                        severity="critical",
+                        description=f"[pytest] {line.strip()}",
+                    )
+                )
+        else:
+            issues.append(
+                QAIssue(
+                    file=str(project_dir),
+                    severity="critical",
+                    description=f"[pytest] Tests failed (exit {result.returncode}):\n{pytest_output[:600]}",
+                )
+            )
+        print(f"    ⚠️  pytest: {result.returncode} (failures found)")
+    else:
+        print("    ✅ pytest: all tests passed")
+
+    return issues
+
+
 # ── Main node ─────────────────────────────────────────────────────────────────
 
 
@@ -398,6 +598,66 @@ def qa_node(state: AgentState) -> dict:
         }
     )
 
+    # ── [TOOL CHECKS] ruff + pytest before LLM review ────────────────────────
+    run_output_dir = state.get("run_output_dir", "")
+    tool_call_fn = state.get("tool_call_callback")
+    tool_issues: list[QAIssue] = []
+
+    if run_output_dir:
+        project_dir = Path(run_output_dir) / "output" / "project"
+        try:
+            tool_issues = _run_tool_checks(
+                code_files, project_dir, tool_call_fn, _log
+            )
+        except ToolSkippedError as exc:
+            print(
+                f"\n[AI-DLC] Tool '{exc}' skipped by user — stopping QA with FAIL.\n"
+            )
+            _log(
+                {
+                    "agent": "qa",
+                    "phase": "reason",
+                    "content": f"Tool '{exc}' skipped by user. AI-DLC QA decision: FAIL.",
+                }
+            )
+            return {
+                "qa_passed": False,
+                "qa_feedback": f"QA stopped: user skipped the '{exc}' tool check.",
+                "qa_issues": [],
+                "iteration": iteration + 1,
+                "reasoning_logs": reasoning_logs,
+            }
+
+        if not tool_issues:
+            # All tool checks passed — skip LLM pipeline entirely
+            print("\n[AI-DLC] All tool checks passed — skipping LLM review.\n")
+            _log(
+                {
+                    "agent": "qa",
+                    "phase": "reason",
+                    "content": "ruff + pytest both passed. AI-DLC QA decision: PASS.",
+                }
+            )
+            return {
+                "qa_passed": True,
+                "qa_feedback": "",
+                "qa_issues": [],
+                "iteration": iteration + 1,
+                "reasoning_logs": reasoning_logs,
+            }
+
+        # Tool failures found — feed them into the LLM review as pre-seeded issues
+        print(
+            f"\n[AI-DLC] Tool checks found {len(tool_issues)} issue(s) — continuing with LLM review.\n"
+        )
+        _log(
+            {
+                "agent": "qa",
+                "phase": "act",
+                "content": f"Tool checks: {len(tool_issues)} issue(s). Continuing to LLM review.",
+            }
+        )
+
     # ── [TRIAGE] ─────────────────────────────────────────────────────────────
     priority_map = _triage(llm, specs, code_files)
     _log(
@@ -409,6 +669,15 @@ def qa_node(state: AgentState) -> dict:
     )
 
     # ── [REVIEW] All files in parallel (critical-first order preserved) ───────
+    # Build a per-file index of tool issues so REVIEW and FIX see exact diagnostics.
+    # ruff emits absolute paths; match on basename as a fallback.
+    tool_issues_by_file: dict[str, list[QAIssue]] = {}
+    for issue in tool_issues:
+        for cf in code_files:
+            if cf.path in issue.file or issue.file.endswith(cf.path):
+                tool_issues_by_file.setdefault(cf.path, []).append(issue)
+                break
+
     ordered_files = sorted(
         code_files,
         key=lambda f: {"critical": 0, "important": 1, "standard": 2}.get(
@@ -423,6 +692,7 @@ def qa_node(state: AgentState) -> dict:
                 specs,
                 f,
                 priority_map.get(f.path, "standard"),
+                tool_issues_by_file.get(f.path, []),
             )
             for f in ordered_files
         ]
@@ -492,6 +762,17 @@ def qa_node(state: AgentState) -> dict:
         if code_file is not None:
             files_to_fix.append((result, code_file))
 
+    print(
+        f"[FIX] Generating fix instructions for {len(files_to_fix)} file(s) …"
+    )
+    _log(
+        {
+            "agent": "qa",
+            "phase": "act",
+            "content": f"Generating fix instructions for {len(files_to_fix)} file(s)…",
+        }
+    )
+
     instructions_list: list[str] = run_parallel(
         [
             partial(
@@ -500,6 +781,7 @@ def qa_node(state: AgentState) -> dict:
                 specs,
                 code_file,
                 result["issues"],
+                tool_issues_by_file.get(code_file.path, []),
             )
             for result, code_file in files_to_fix
         ]
@@ -537,7 +819,7 @@ def qa_node(state: AgentState) -> dict:
             {
                 "agent": "qa",
                 "phase": "reason",
-                "content": f"AI-DLC QA decision: FAIL at iteration {iteration + 1}. Feedback dispatched.",
+                "content": f"Issues found — routing back to Developer for fixes (iteration {iteration + 1}/{max_iterations}).",
             }
         )
         return {
