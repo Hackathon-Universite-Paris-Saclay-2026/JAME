@@ -24,6 +24,8 @@ class InMemoryRunStore:
         self._tokens: dict[str, CancelToken] = {}
         self._chunk_queues: dict[str, asyncio.Queue] = {}
         self._clarification_futures: dict[str, asyncio.Future[str]] = {}
+        # tool_call_id → Future["run"|"skip"]
+        self._tool_futures: dict[str, asyncio.Future[str]] = {}
         # Buffer all events so late-joining WebSocket subscribers (race with pipeline start)
         # receive the full history on connect.
         self._event_buffer: dict[str, list[ReasoningEvent]] = defaultdict(list)
@@ -106,6 +108,24 @@ class InMemoryRunStore:
         future = self._clarification_futures.pop(run_id, None)
         if future and not future.done():
             future.set_result(answer)
+            return True
+        return False
+
+    def request_tool_call(self, tool_call_id: str) -> asyncio.Future[str]:
+        """Create and store a Future resolved when the user responds run/skip."""
+        loop = asyncio.get_event_loop()
+        future: asyncio.Future[str] = loop.create_future()
+        self._tool_futures[tool_call_id] = future
+        return future
+
+    def submit_tool_response(self, tool_call_id: str, action: str) -> bool:
+        """Resolve a pending tool_call future with 'run' or 'skip'.
+
+        Returns True if a pending future was found and resolved.
+        """
+        future = self._tool_futures.pop(tool_call_id, None)
+        if future and not future.done():
+            future.set_result(action)
             return True
         return False
 
