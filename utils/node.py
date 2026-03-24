@@ -25,9 +25,14 @@ from integrations.github import auto_commit, init_repo
 
 _MODE_PREAMBLES: dict[str, str] = {
     "junior": (
-        "Generate a simple, minimal implementation. "
-        "Prefer clarity over completeness — omit advanced patterns, "
-        "logging, and optimisation unless explicitly requested."
+        # Junior generates the same expert-quality golden solution as expert mode.
+        # The exercise packager then strips it into stubs for the learner to implement.
+        # Clean, well-structured code is essential so the learner has a good reference.
+        "Generate an enterprise-grade implementation. "
+        "Apply advanced patterns (SOLID, DRY, appropriate design patterns), "
+        "observability hooks, and full error-handling strategies. "
+        "Write clean, well-commented code — it serves as the reference solution "
+        "for a learning exercise."
     ),
     "senior": (
         "Generate a well-structured, production-quality implementation. "

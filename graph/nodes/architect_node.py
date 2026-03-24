@@ -392,8 +392,29 @@ def architect_node(state: AgentState) -> dict:
                 HumanMessage(content=context),
             ]
 
-        d_resp = llm.invoke(messages)
-        thinking, raw = strip_thinking(d_resp.content)
+        # Stream the design so the UI shows progress in real-time.
+        # Emit only periodic progress updates (every 500 chars) to avoid
+        # flooding the log with one line per token.
+        raw_chunks: list[str] = []
+        _emitted_len = 0
+        _EMIT_INTERVAL = 500
+        for chunk in llm.stream(messages):
+            token = chunk.content if hasattr(chunk, "content") else str(chunk)
+            if token:
+                raw_chunks.append(token)
+                if _emit:
+                    total = sum(len(c) for c in raw_chunks)
+                    if total - _emitted_len >= _EMIT_INTERVAL:
+                        _emitted_len = total
+                        _emit(
+                            {
+                                "agent": "architect",
+                                "phase": "act",
+                                "content": f"Designing… {total} chars",
+                            }
+                        )
+        raw = "".join(raw_chunks)
+        thinking, raw = strip_thinking(raw)
         if thinking:
             print(
                 f"[THINKING — design {iteration}]\n"
@@ -412,8 +433,31 @@ def architect_node(state: AgentState) -> dict:
             }
         )
 
-        # Self-critique
-        if scope not in ("function", "feature"):
+        # Lightweight scope skips all validation
+        if scope in ("function", "feature"):
+            approved = True
+            break
+
+        # Expert and junior modes are fully autonomous — no human review of specs.
+        # Expert: zero human-in-the-loop, highest code quality, runs to completion.
+        # Junior: same autonomous generation, then exercise packager strips it into stubs.
+        # Senior: human reviews specs once before developer starts.
+        if mode in ("expert", "junior"):
+            approved = True
+            _log(
+                {
+                    "agent": "architect",
+                    "phase": "validate",
+                    "content": f"{mode.capitalize()} mode — auto-approved specs, proceeding autonomously.",
+                }
+            )
+            break
+
+        # Self-critique only runs in interactive CLI mode where its output feeds
+        # into _validate_with_user and the human can request a revision.
+        # In API mode the result is never shown to the user so it would be a
+        # wasted LLM call.
+        if interactive and scope not in ("function", "feature"):
             critique_issues = _self_critique(llm, specs, diagrams)
             reasoning_logs.append(
                 {
@@ -425,19 +469,13 @@ def architect_node(state: AgentState) -> dict:
                 }
             )
 
-        # Lightweight scope skips user validation
-        if scope in ("function", "feature"):
-            approved = True
-            break
-
-        # API mode: request specs approval for system/product scopes when
-        # a clarification_callback is available (i.e. a WebSocket client is
-        # connected).  Simple scopes auto-approve as before.
+        # API mode: request specs approval — senior mode only.
         if not interactive:
             _specs_review_callback = state.get("clarification_callback")
             _needs_review = (
                 scope in ("system", "product")
                 and _specs_review_callback is not None
+                and mode == "senior"
             )
             if _needs_review:
                 _log(
@@ -479,13 +517,26 @@ def architect_node(state: AgentState) -> dict:
                         }
                     )
                     break
-                # Treat answer as revision feedback
+                # Senior: user edited the specs file directly — use their content
+                # immediately without re-generating (they are the architect).
+                if mode == "senior" and len(answer) > 50:
+                    specs = answer
+                    approved = True
+                    _log(
+                        {
+                            "agent": "architect",
+                            "phase": "specs_review",
+                            "content": "Specs updated from user edits — proceeding to development.",
+                        }
+                    )
+                    break
+                # CLI/interactive mode: treat answer as revision feedback for LLM
                 feedback = answer
                 _log(
                     {
                         "agent": "architect",
                         "phase": "specs_review",
-                        "content": f"Revision requested: {feedback}",
+                        "content": f"Revision requested: {feedback[:100]}…",
                     }
                 )
                 memory = maybe_compress(

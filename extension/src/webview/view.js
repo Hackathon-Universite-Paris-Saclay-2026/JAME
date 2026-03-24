@@ -279,8 +279,10 @@ let ws               = null;
 let isRunning        = false;
 let generatedFiles   = [];
 let projectDir       = null;
-let currentIteration = 0;
-let lastAgent        = null;
+let currentIteration    = 0;
+let lastAgent           = null;
+let _architectStreamBuf = '';   // accumulated architect design tokens
+let _architectStreamRow = null; // live DOM row for streaming architect output
 let tcAutoApprove    = false;
 let tcPending        = null;
 // files panel state
@@ -689,6 +691,7 @@ const AGENT_SHORT = {
 function breakAgentGroup() {
   _lastRowAc = null;
   _currentAgentGroup = null;
+  _architectStreamRow = null;
 }
 
 function addTlRow(agentDisplay, msg, thinking, phase) {
@@ -1086,6 +1089,50 @@ function showClarificationCard(question, options) {
 
   if (opts.length > 0) renderPage();
   updateNav();
+
+  feed.appendChild(card);
+  scrollFeed();
+}
+
+// C4 Diagrams card — shown after architect completes
+function showDiagramsCard(specs, diagrams, scope) {
+  breakAgentGroup();
+  const card = document.createElement('div');
+  card.className = 'diagrams-card';
+
+  const sections = [];
+  if (specs) sections.push({ label: 'Specifications', content: specs, mono: false });
+  if (diagrams) sections.push({ label: 'C4 Diagrams', content: diagrams, mono: true });
+
+  let html = '<div class="diagrams-card-header">';
+  html += '<span class="diagrams-icon">&#128196;</span>';
+  html += '<strong>Architecture design complete</strong>';
+  if (scope) html += ' <span class="diagrams-scope">(' + escHtml(scope) + ' scope)</span>';
+  html += '</div>';
+
+  sections.forEach(({ label, content, mono }) => {
+    const id = 'diag-section-' + Math.random().toString(36).slice(2);
+    html += '<div class="diagrams-section">';
+    html += '<button class="diagrams-toggle" data-target="' + id + '">&#9654; ' + escHtml(label) + '</button>';
+    html += '<div class="diagrams-body' + (mono ? ' diagrams-code' : '') + '" id="' + id + '">';
+    if (mono) {
+      html += '<pre>' + escHtml(content) + '</pre>';
+    } else {
+      html += '<div class="diagrams-prose">' + renderMd(content) + '</div>';
+    }
+    html += '</div></div>';
+  });
+
+  card.innerHTML = html;
+
+  card.querySelectorAll('.diagrams-toggle').forEach(btn => {
+    const targetId = btn.getAttribute('data-target');
+    btn.addEventListener('click', () => {
+      const body = document.getElementById(targetId);
+      const open = body.classList.toggle('shown');
+      btn.textContent = (open ? '▼ ' : '▶ ') + btn.textContent.slice(2);
+    });
+  });
 
   feed.appendChild(card);
   scrollFeed();
@@ -1673,16 +1720,18 @@ window.addEventListener('message', async (event) => {
   }
 
   if (msg.command === 'specsFileContent') {
-    // view.ts read back the edited specs MD — resolve the pending revise
+    // view.ts read back the edited specs MD — approve if unchanged, revise if edited
     if (_pendingReviseFromFile) {
       const { originalSpecs, settle } = _pendingReviseFromFile;
       _pendingReviseFromFile = null;
       const content = msg.content || '';
-      // Use the edited content as feedback; if unchanged, note that
-      const feedback = content.trim() === (originalSpecs || '').trim()
-        ? 'Revision requested — no textual changes detected in the specs file.'
-        : content;
-      settle('revise', feedback);
+      if (content.trim() === (originalSpecs || '').trim()) {
+        // No changes — treat as approval
+        settle('approve', '');
+      } else {
+        // User edited the file — send diff as revision feedback
+        settle('revise', content);
+      }
     }
     return;
   }
@@ -1749,6 +1798,33 @@ function handleServerEvent(data) {
         (exitCode === 0 ? '\u2705 Passed' : '\u274c Failed (exit ' + exitCode + ')') +
         (output ? '\n' + output.slice(0, 900) : '');
       if (targetCard) { targetCard.appendChild(resultEl); }
+      scrollFeed();
+      return;
+    }
+
+    // Architect design streaming: update a single live row with char count
+    if (rawAgent === 'architect' && (phase === 'act' || payload.phase === 'act')) {
+      // Extract char count from progress message "Designing… N chars"
+      const match = msg.match(/(\d+)\s*chars/);
+      if (match) _architectStreamBuf = match[1];
+      if (!_architectStreamRow) {
+        if (!_currentAgentGroup || _lastRowAc !== 'ac-architect') {
+          _currentAgentGroup = document.createElement('div');
+          _currentAgentGroup.className = 'agent-group ac-architect fade-in';
+          feed.appendChild(_currentAgentGroup);
+          _lastRowAc = 'ac-architect';
+        }
+        const row = document.createElement('div');
+        row.className = 'agent-row same-agent';
+        row.innerHTML =
+          '<span class="ar-tag">ARCH</span>' +
+          '<span class="ar-phase phase-act">act</span>' +
+          '<span class="ar-msg ar-stream-msg">Designing architecture\u2026 <span class="ar-stream-count">0</span> chars</span>';
+        _currentAgentGroup.appendChild(row);
+        _architectStreamRow = row;
+      }
+      const counter = _architectStreamRow.querySelector('.ar-stream-count');
+      if (counter && match) counter.textContent = match[1];
       scrollFeed();
       return;
     }
@@ -1824,6 +1900,22 @@ function handleServerEvent(data) {
     const question = p.question || data.message || 'Please clarify:';
     const options = p.options || [];
     showClarificationCard(question, options);
+    return;
+  }
+
+  if (event === 'architect_done') {
+    const p = data.payload || {};
+    // Remove the live streaming row — diagrams card takes its place
+    if (_architectStreamRow) {
+      _architectStreamRow.remove();
+      _architectStreamRow = null;
+    }
+    _architectStreamBuf = '';
+    showDiagramsCard(p.specs || '', p.diagrams || '', p.scope || '');
+    // Save specs + diagrams as docs in the workspace
+    if (p.specs || p.diagrams) {
+      vscode.postMessage({ command: 'saveArchitectDocs', specs: p.specs || '', diagrams: p.diagrams || '' });
+    }
     return;
   }
 

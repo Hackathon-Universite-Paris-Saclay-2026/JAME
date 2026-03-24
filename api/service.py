@@ -543,6 +543,24 @@ class OrchestratorService:
 
                     final_state = self._merge_state(final_state, node_update)
 
+                    # After architect: emit specs + diagrams so UI can display them
+                    if node_name == "architect":
+                        diagrams = node_update.get("diagrams", "")
+                        specs = node_update.get("specs", "")
+                        if diagrams or specs:
+                            await self._emit(
+                                run_id=run_id,
+                                event="architect_done",
+                                message="Architecture design complete.",
+                                agent="architect",
+                                phase="design",
+                                payload={
+                                    "specs": specs,
+                                    "diagrams": diagrams,
+                                    "scope": node_update.get("scope", ""),
+                                },
+                            )
+
                     # After developer: notify UI of generated files
                     if node_name == "developer" and node_update.get(
                         "code_files"

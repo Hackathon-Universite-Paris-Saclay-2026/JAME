@@ -925,6 +925,56 @@ textarea:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 .fade-in { animation: fadeSlideIn 0.25s ease forwards; }
 
+/* ── Diagrams Card ────────────────────────────────────────────────────── */
+.diagrams-card {
+  margin: 8px 12px;
+  padding: 12px 14px;
+  background: #1a2a1a;
+  border: 1px solid #2a6a2a;
+  border-left: 3px solid #4a9a4a;
+  border-radius: 5px;
+  font-size: 12px;
+}
+.diagrams-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  color: #9cdcb0;
+}
+.diagrams-icon { font-size: 14px; }
+.diagrams-scope { color: #6a9a6a; font-size: 11px; }
+.diagrams-section { margin-bottom: 6px; }
+.diagrams-toggle {
+  background: none;
+  border: none;
+  color: #7ec8a0;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 2px 0;
+  text-align: left;
+}
+.diagrams-toggle:hover { color: #b0e0b0; }
+.diagrams-body {
+  display: none;
+  margin-top: 6px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+.diagrams-body.shown { display: block; }
+.diagrams-body pre {
+  background: #0d0d0d;
+  border: 1px solid #2a2a2a;
+  border-radius: 4px;
+  padding: 10px;
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: #c8e6c8;
+  margin: 0;
+}
+.diagrams-prose { color: #ccc; line-height: 1.5; }
+
 /* ── Specs Review Card ────────────────────────────────────────────────── */
 .specs-review-card {
   margin: 8px 12px;

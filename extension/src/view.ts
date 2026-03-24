@@ -131,6 +131,8 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
         action?: string;
         feedback?: string;
         prompt?: string;
+        specs?: string;
+        diagrams?: string;
       };
 
       if (msg.command === "openGeneratedFiles") {
@@ -160,6 +162,21 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
 
       if (msg.command === "openProposedChange") {
         await this.openProposedChange(msg.filePath!, msg.fileContent!);
+        return;
+      }
+
+      if (msg.command === "saveArchitectDocs") {
+        const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (workspaceRoot) {
+          const docsDir = path.join(workspaceRoot, ".jame", "docs");
+          fs.mkdirSync(docsDir, { recursive: true });
+          if (msg.specs) {
+            fs.writeFileSync(path.join(docsDir, "specifications.md"), msg.specs, "utf8");
+          }
+          if (msg.diagrams) {
+            fs.writeFileSync(path.join(docsDir, "c4_diagrams.md"), msg.diagrams, "utf8");
+          }
+        }
         return;
       }
 
