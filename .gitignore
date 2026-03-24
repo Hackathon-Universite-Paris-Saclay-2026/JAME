@@ -79,6 +79,7 @@ Thumbs.db
 # Project specific
 instance/
 .webassets-cache
+*.bak
 
 # Generated output
 output/
