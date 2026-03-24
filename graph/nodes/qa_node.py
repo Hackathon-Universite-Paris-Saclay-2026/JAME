@@ -588,6 +588,7 @@ def _run_project_qa(
       triggered, otherwise the inappropriate tests are pruned inline and QA
       passes with the cleaned ``code_files``.
     """
+
     def _log(entry: dict) -> None:
         reasoning_logs.append(entry)
         if emit_callback:
