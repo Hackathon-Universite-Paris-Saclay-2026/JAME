@@ -74,6 +74,18 @@ fixable = ["ALL"]
     "S101", # Allow use of assert in tests
 ]
 "**/tests/**/*.py" = ["D", "ANN", "S101"]
+"utils/node.py" = [
+    "S310",   # urllib.request.urlopen polls localhost health endpoint only (finalize_artifacts)
+    "TRY300", # return-in-try style — intentional for polling loop readability
+    "S110",   # try-except-pass intentional for silent URL probe failures
+]
+"utils/run_test_helper.py" = [
+    "S603",   # subprocess calls use controlled internal paths (venv, pip, pytest, py_compile, npm, node, npx, tsc)
+    "S310",   # urllib.request.urlopen polls localhost health endpoint only
+    "TRY300", # return-in-try style — intentional for polling loop readability
+    "S110",   # try-except-pass intentional for silent URL probe failures
+    "S607",   # partial executable paths (npm, node, npx) — resolved by PATH at runtime
+]
 
 [tool.ruff.lint.pydocstyle]
 # Use Google docstring convention
