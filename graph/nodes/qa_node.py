@@ -590,21 +590,19 @@ def _run_project_qa(
     languages: set[str],
     *,
     needs_full_qa: bool,
+    tool_call_fn: Callable | None = None,
     emit_callback: object = None,
 ) -> dict:
     """Unified QA runtime path for all project sizes.
 
-    Runs setup → tests → compile/syntax-check for every detected language.
+    Runs setup → tool checks (ruff + pytest) → compile/syntax-check for
+    every detected language.
 
     ``needs_full_qa`` controls failure handling:
-    - ``True`` (full project): setup/compile failures are blocking; test
-      failures trigger a detailed per-file review + fix instructions →
-      ``qa_passed=False`` sent to Developer.
+    - ``True`` (full project): setup/compile failures are blocking; specs
+      comparison is run at the end.
     - ``False`` (small project): setup failures are non-blocking; compile
-      errors are always blocking (SyntaxErrors must be fixed); test failures
-      are assessed via relevancy — if any ``FIX THE CODE`` verdict is found
-      the fix loop is triggered, otherwise the inappropriate tests are pruned
-      inline and QA passes with the cleaned ``code_files``.
+      errors are non-blocking.
     """
 
     def _log(entry: dict) -> None:
@@ -615,7 +613,6 @@ def _run_project_qa(
     scope = "Full" if needs_full_qa else "Small"
     print(f"\n[QA] {scope} project ({', '.join(sorted(languages))})")
 
-    # Tracks code_files, potentially updated by test pruning on small projects.
     updated_files = code_files
 
     # ── SETUP ─────────────────────────────────────────────────────────────────
@@ -663,138 +660,55 @@ def _run_project_qa(
                 }
             print("[SETUP] ⚠️  JS setup failed — skipping JS checks")
 
-    # ── TEST ──────────────────────────────────────────────────────────────────
-    all_failed_summaries: list[str] = []
-    combined_test_output = ""
+    # ── TOOL CHECKS (ruff + pytest) ───────────────────────────────────────────
+    try:
+        tool_issues = _run_tool_checks(
+            code_files, project_dir, tool_call_fn, _log, venv_dir=venv_dir
+        )
+    except ToolSkippedError as exc:
+        _log(
+            {
+                "agent": "qa",
+                "phase": "reason",
+                "content": f"Tool '{exc}' skipped by user. QA decision: FAIL.",
+            }
+        )
+        return {
+            "qa_passed": False,
+            "qa_feedback": f"QA stopped: user skipped the '{exc}' tool check.",
+            "qa_issues": [],
+            "code_files": [cf.model_dump() for cf in code_files],
+            "iteration": iteration + 1,
+            "reasoning_logs": reasoning_logs,
+        }
 
-    if "python" in languages:
-        py_passed, py_output, py_failures = run_pytest(venv_dir, project_dir)
-        combined_test_output += py_output
-        if not py_passed:
-            all_failed_summaries.extend(py_failures)
+    if tool_issues:
+        tool_feedback = "\n".join(
+            f"- [{i.severity}] {i.description}" for i in tool_issues
+        )
         _log(
             {
                 "agent": "qa",
-                "phase": "act",
-                "content": "Python tests passed."
-                if py_passed
-                else f"{len(py_failures)} Python test failure(s).",
+                "phase": "reason",
+                "content": f"Tool checks: {len(tool_issues)} issue(s). QA decision: FAIL.",
             }
         )
+        return {
+            "qa_passed": False,
+            "qa_feedback": f"## Tool Check Issues\n{tool_feedback}",
+            "qa_issues": [i.model_dump() for i in tool_issues],
+            "code_files": [cf.model_dump() for cf in code_files],
+            "iteration": iteration + 1,
+            "reasoning_logs": reasoning_logs,
+        }
 
-    if "javascript" in languages:
-        js_passed, js_output, js_failures = run_js_tests(project_dir)
-        combined_test_output += js_output
-        if not js_passed:
-            all_failed_summaries.extend(js_failures)
-        _log(
-            {
-                "agent": "qa",
-                "phase": "act",
-                "content": "JS tests passed."
-                if js_passed
-                else f"{len(js_failures)} JS test failure(s).",
-            }
-        )
-
-    if all_failed_summaries:
-        print("[RELEVANCY] Assessing test relevancy …")
-        if needs_full_qa:
-            # Full path: run relevancy + per-file review in parallel
-            relevancy_feedback, (per_file_results, qa_issues) = run_parallel(
-                [
-                    partial(
-                        _assess_test_relevancy,
-                        llm,
-                        specs,
-                        code_files,
-                        all_failed_summaries,
-                    ),
-                    partial(
-                        _review_failing_files,
-                        llm,
-                        specs,
-                        code_files,
-                        all_failed_summaries,
-                    ),
-                ]
-            )
-            _log(
-                {
-                    "agent": "qa",
-                    "phase": "act",
-                    "content": f"Test relevancy assessed. {len(per_file_results)} file(s) reviewed.",
-                }
-            )
-            qa_feedback = _build_fix_feedback(
-                llm,
-                specs,
-                code_files,
-                per_file_results,
-                relevancy_feedback,
-                combined_test_output,
-            )
-            _log(
-                {
-                    "agent": "qa",
-                    "phase": "reason",
-                    "content": f"QA FAIL: tests failed at iteration {iteration + 1}.",
-                }
-            )
-            return {
-                "qa_passed": False,
-                "qa_feedback": qa_feedback,
-                "qa_issues": [i.model_dump() for i in qa_issues],
-                "code_files": [cf.model_dump() for cf in code_files],
-                "iteration": iteration + 1,
-                "reasoning_logs": reasoning_logs,
-            }
-        # Small path: relevancy decides — code fault triggers fix loop,
-        # test fault is acknowledged and QA continues
-        relevancy_feedback = _assess_test_relevancy(
-            llm, specs, code_files, all_failed_summaries
-        )
-        _log(
-            {
-                "agent": "qa",
-                "phase": "act",
-                "content": f"Test relevancy: {relevancy_feedback}",
-            }
-        )
-        if "FIX THE CODE" in relevancy_feedback:
-            print("[QA] Code fault(s) detected — triggering fix loop …")
-            _log(
-                {
-                    "agent": "qa",
-                    "phase": "reason",
-                    "content": "Small project: code fault(s) found — sending to Developer.",
-                }
-            )
-            return {
-                "qa_passed": False,
-                "qa_feedback": (
-                    f"## Test Relevancy Assessment\n{relevancy_feedback}"
-                    f"\n\n## Failed Test Output\n```\n"
-                    f"{combined_test_output[-3000:]}\n```"
-                ),
-                "qa_issues": [],
-                "code_files": [cf.model_dump() for cf in code_files],
-                "iteration": iteration + 1,
-                "reasoning_logs": reasoning_logs,
-            }
-        print(
-            f"[QA] Tests are inappropriate — pruning {len(all_failed_summaries)} failing test(s) …"
-        )
-        updated_files = _prune_failing_tests(
-            llm, updated_files, all_failed_summaries, project_dir
-        )
-        _log(
-            {
-                "agent": "qa",
-                "phase": "act",
-                "content": f"Small project: {len(all_failed_summaries)} inappropriate test(s) pruned.",
-            }
-        )
+    _log(
+        {
+            "agent": "qa",
+            "phase": "act",
+            "content": "ruff + pytest passed — proceeding to compile check.",
+        }
+    )
 
     # ── COMPILE / SYNTAX CHECK ────────────────────────────────────────────────
     compile_errors: list[str] = []
@@ -911,6 +825,7 @@ def _run_tool_checks(
     project_dir: Path,
     tool_call_fn: Callable | None,
     log: Callable[[dict], None],
+    venv_dir: Path | None = None,
 ) -> list[QAIssue]:
     """Write code files to *project_dir*, then run ruff and pytest.
 
@@ -997,7 +912,11 @@ def _run_tool_checks(
         print("    ✅ ruff: no issues")
 
     # ── pytest ─────────────────────────────────────────────────────────────────
-    pytest_bin = shutil.which("pytest") or "pytest"
+    if venv_dir:
+        venv_pytest = venv_dir / "bin" / "pytest"
+        pytest_bin = str(venv_pytest) if venv_pytest.exists() else (shutil.which("pytest") or "pytest")
+    else:
+        pytest_bin = shutil.which("pytest") or "pytest"
     pytest_args = [str(project_dir), "-v", "--tb=short", "--no-header"]
     pytest_id = str(uuid.uuid4())
 
@@ -1178,29 +1097,6 @@ def qa_node(state: AgentState) -> dict:
             "reasoning_logs": reasoning_logs,
         }
 
-    # ── TOOL CHECKS (ruff + pytest) ───────────────────────────────────────────
-    tool_issues: list[QAIssue] = []
-    try:
-        tool_issues = _run_tool_checks(
-            code_files, project_dir, tool_call_fn, _log
-        )
-    except ToolSkippedError as exc:
-        print(f"\n[QA] Tool '{exc}' skipped by user — stopping QA with FAIL.\n")
-        _log(
-            {
-                "agent": "qa",
-                "phase": "reason",
-                "content": f"Tool '{exc}' skipped by user. QA decision: FAIL.",
-            }
-        )
-        return {
-            "qa_passed": False,
-            "qa_feedback": f"QA stopped: user skipped the '{exc}' tool check.",
-            "qa_issues": [],
-            "iteration": iteration + 1,
-            "reasoning_logs": reasoning_logs,
-        }
-
     # ── SCOPE DECISION ────────────────────────────────────────────────────────
     print("[QA] Deciding QA scope …")
     decision = _decide_scope(llm, compressed_specs, code_files)
@@ -1213,7 +1109,7 @@ def qa_node(state: AgentState) -> dict:
         }
     )
 
-    result = _run_project_qa(
+    return _run_project_qa(
         llm,
         compressed_specs,
         code_files,
@@ -1224,28 +1120,6 @@ def qa_node(state: AgentState) -> dict:
         reasoning_logs,
         languages,
         needs_full_qa=decision.needs_full_qa,
+        tool_call_fn=tool_call_fn,
         emit_callback=_emit,
     )
-
-    # Merge ruff/pytest tool issues into the runtime QA result
-    if tool_issues:
-        tool_serialized = [i.model_dump() for i in tool_issues]
-        merged_issues = result.get("qa_issues", []) + tool_serialized
-        tool_feedback = "\n".join(
-            f"- [{i.severity}] {i.description}" for i in tool_issues
-        )
-        existing_feedback = result.get("qa_feedback", "")
-        merged_feedback = (
-            f"## Tool Check Issues\n{tool_feedback}\n\n{existing_feedback}"
-        ).strip()
-        tool_blocking = any(
-            i.severity in ("critical", "major") for i in tool_issues
-        )
-        result = {
-            **result,
-            "qa_passed": result.get("qa_passed", True) and not tool_blocking,
-            "qa_issues": merged_issues,
-            "qa_feedback": merged_feedback,
-        }
-
-    return result
