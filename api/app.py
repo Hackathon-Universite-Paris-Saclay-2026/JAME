@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from .models import (
+    ClarifyRequest,
     ExerciseResponse,
     RunCreateRequest,
     RunCreateResponse,
@@ -75,6 +77,22 @@ def get_run(run_id: str) -> RunStatusResponse:
         reasoning_logs=record.result.get("reasoning_logs", []),
         artifacts=service.store.artifacts_for(run_id),
     )
+
+
+@app.post("/runs/{run_id}/clarify")
+async def clarify_run(run_id: str, request: ClarifyRequest) -> dict[str, str]:
+    """Submit a clarification answer from the user to unblock the architect node."""
+    record = service.store.get_run(run_id)
+    if record is None:
+        raise HTTPException(
+            status_code=404, detail=f"Run '{run_id}' not found."
+        )
+    resolved = service.store.submit_clarification(run_id, request.answer)
+    if not resolved:
+        raise HTTPException(
+            status_code=409, detail="No pending clarification for this run."
+        )
+    return {"status": "clarification_received"}
 
 
 @app.post("/runs/{run_id}/cancel")
@@ -168,9 +186,20 @@ async def run_events(ws: WebSocket, run_id: str) -> None:
     await ws.accept()
     queue = service.store.subscribe(run_id)
 
+    terminal_events = {"run_completed", "run_failed", "run_cancelled"}
+
     try:
         while True:
             event = await queue.get()
+            if event is None:
+                # Sentinel pushed by the pipeline when it reaches a terminal state
+                break
             await ws.send_json(event.model_dump(mode="json"))
+            if event.event in terminal_events:
+                break
     except WebSocketDisconnect:
+        pass
+    finally:
         service.store.unsubscribe(run_id, queue)
+        with suppress(Exception):
+            await ws.close()
