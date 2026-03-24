@@ -535,6 +535,18 @@ def _run_file_planning(
                 file_plan.append(mf)
 
     file_plan = _sort_by_layer(file_plan)
+
+    # Guarantee package.json for JavaScript/TypeScript projects.
+    _js_exts = frozenset({".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx"})
+    has_js = any(PurePosixPath(fp).suffix in _js_exts for fp in file_plan)
+    has_pkg = any(
+        fp == "package.json" or fp.endswith("/package.json") for fp in file_plan
+    )
+    if has_js and not has_pkg:
+        file_plan.append("package.json")
+        file_plan = _sort_by_layer(file_plan)
+        print("[PLAN] Injected missing package.json for JS/TS project.")
+
     print(
         f"[PLAN] File plan ({len(file_plan)} files, dependency-ordered): {file_plan}"
     )
