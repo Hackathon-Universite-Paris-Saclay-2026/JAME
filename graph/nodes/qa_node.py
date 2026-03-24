@@ -572,6 +572,7 @@ def _run_project_qa(
     languages: set[str],
     *,
     needs_full_qa: bool,
+    emit_callback: object = None,
 ) -> dict:
     """Unified QA runtime path for all project sizes.
 
@@ -587,6 +588,11 @@ def _run_project_qa(
       triggered, otherwise the inappropriate tests are pruned inline and QA
       passes with the cleaned ``code_files``.
     """
+    def _log(entry: dict) -> None:
+        reasoning_logs.append(entry)
+        if emit_callback:
+            emit_callback(entry)
+
     scope = "Full" if needs_full_qa else "Small"
     print(f"\n[QA] {scope} project ({', '.join(sorted(languages))})")
 
@@ -599,7 +605,7 @@ def _run_project_qa(
             venv_dir, project_dir, code_files
         )
         if not setup_ok:
-            reasoning_logs.append(
+            _log(
                 {
                     "agent": "qa",
                     "phase": "act",
@@ -620,7 +626,7 @@ def _run_project_qa(
     if "javascript" in languages:
         setup_ok, setup_error = setup_js_environment(project_dir)
         if not setup_ok:
-            reasoning_logs.append(
+            _log(
                 {
                     "agent": "qa",
                     "phase": "act",
@@ -647,7 +653,7 @@ def _run_project_qa(
         combined_test_output += py_output
         if not py_passed:
             all_failed_summaries.extend(py_failures)
-        reasoning_logs.append(
+        _log(
             {
                 "agent": "qa",
                 "phase": "act",
@@ -662,7 +668,7 @@ def _run_project_qa(
         combined_test_output += js_output
         if not js_passed:
             all_failed_summaries.extend(js_failures)
-        reasoning_logs.append(
+        _log(
             {
                 "agent": "qa",
                 "phase": "act",
@@ -694,7 +700,7 @@ def _run_project_qa(
                     ),
                 ]
             )
-            reasoning_logs.append(
+            _log(
                 {
                     "agent": "qa",
                     "phase": "act",
@@ -709,7 +715,7 @@ def _run_project_qa(
                 relevancy_feedback,
                 combined_test_output,
             )
-            reasoning_logs.append(
+            _log(
                 {
                     "agent": "qa",
                     "phase": "reason",
@@ -729,7 +735,7 @@ def _run_project_qa(
         relevancy_feedback = _assess_test_relevancy(
             llm, specs, code_files, all_failed_summaries
         )
-        reasoning_logs.append(
+        _log(
             {
                 "agent": "qa",
                 "phase": "act",
@@ -738,7 +744,7 @@ def _run_project_qa(
         )
         if "FIX THE CODE" in relevancy_feedback:
             print("[QA] Code fault(s) detected — triggering fix loop …")
-            reasoning_logs.append(
+            _log(
                 {
                     "agent": "qa",
                     "phase": "reason",
@@ -763,7 +769,7 @@ def _run_project_qa(
         updated_files = _prune_failing_tests(
             llm, updated_files, all_failed_summaries, project_dir
         )
-        reasoning_logs.append(
+        _log(
             {
                 "agent": "qa",
                 "phase": "act",
@@ -785,7 +791,7 @@ def _run_project_qa(
                 print(
                     f"[COMPILE] ⚠️  Python compile error (not blocking):\n{py_compile_error}"
                 )
-        reasoning_logs.append(
+        _log(
             {
                 "agent": "qa",
                 "phase": "act",
@@ -806,7 +812,7 @@ def _run_project_qa(
                 print(
                     f"[COMPILE] ⚠️  JS syntax error (not blocking):\n{js_syntax_error}"
                 )
-        reasoning_logs.append(
+        _log(
             {
                 "agent": "qa",
                 "phase": "act",
@@ -821,7 +827,7 @@ def _run_project_qa(
         qa_issues, qa_feedback = _plan_review(
             llm, specs, updated_files, combined_error
         )
-        reasoning_logs.append(
+        _log(
             {
                 "agent": "qa",
                 "phase": "reason",
@@ -841,7 +847,7 @@ def _run_project_qa(
     if needs_full_qa:
         _specs_comparison(llm, specs, updated_files, run_output_dir)
 
-    reasoning_logs.append(
+    _log(
         {
             "agent": "qa",
             "phase": "reason",
@@ -893,6 +899,7 @@ def qa_node(state: AgentState) -> dict:
     max_iterations = state.get("max_iterations", 3)
     run_output_dir = state.get("run_output_dir", "")
     _emit = state.get("emit_callback")
+    reasoning_logs: list[dict] = []
 
     def _log(entry: dict) -> None:
         reasoning_logs.append(entry)
@@ -900,8 +907,6 @@ def qa_node(state: AgentState) -> dict:
             _emit(entry)
 
     _log({"agent": "qa", "phase": "plan", "content": "QA agent starting…"})
-
-    reasoning_logs: list[dict] = []
     code_files = [_to_code_file(f) for f in raw_files]
 
     if not code_files:
@@ -1009,4 +1014,5 @@ def qa_node(state: AgentState) -> dict:
         reasoning_logs,
         languages,
         needs_full_qa=decision.needs_full_qa,
+        emit_callback=_emit,
     )
