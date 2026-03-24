@@ -161,6 +161,10 @@ class InMemoryRunStore:
         self._subscribers[run_id].append(queue)
         return queue
 
+    def has_subscribers(self, run_id: str) -> bool:
+        """Return True if at least one WebSocket client is subscribed to this run."""
+        return bool(self._subscribers.get(run_id))
+
     def unsubscribe(
         self, run_id: str, queue: asyncio.Queue[ReasoningEvent]
     ) -> None:
