@@ -14,6 +14,8 @@ server never blocks waiting for stdin.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from pathlib import Path
 import sys
 
 from langchain_core.language_models import BaseChatModel
@@ -38,6 +40,12 @@ from utils.node import maybe_compress, parse_json_safe, strip_thinking
 MAX_INTERROGATION_ROUNDS = 3
 MAX_DESIGN_ITERATIONS = 3
 COMPRESS_THRESHOLD = 5000
+
+MODE_PREAMBLE: dict[str, str] = {
+    "junior": "Generate a simple, minimal implementation. Focus on clarity over completeness.",
+    "senior": "Generate a well-structured, production-quality implementation with clear separation of concerns.",
+    "expert": "Generate an enterprise-grade implementation with full observability, scalability, and security considerations.",
+}
 
 
 def _is_interactive() -> bool:
@@ -107,6 +115,7 @@ def _interrogate(
     """
     clarifications: list[dict] = []
     for round_num in range(1, max_rounds + 1):
+        raise_if_cancelled()
         previous_qa = (
             "\n".join(
                 f"Q: {c['question']}\nA: {c['answer']}" for c in clarifications
@@ -146,6 +155,60 @@ def _interrogate(
             clarifications.append({"question": q, "answer": answer})
             print()
         print("─" * 60)
+
+        if done:
+            break
+
+    return clarifications
+
+
+def _interrogate_api(
+    llm: BaseChatModel,
+    user_request: str,
+    max_rounds: int,
+    callback: Callable[[str, list[str]], str],
+) -> list[dict]:
+    """Run up to max_rounds of Q&A using the API callback instead of stdin.
+
+    Called in API mode when a clarification_callback is present in state.
+    """
+    clarifications: list[dict] = []
+    for round_num in range(1, max_rounds + 1):
+        raise_if_cancelled()
+        previous_qa = (
+            "\n".join(
+                f"Q: {c['question']}\nA: {c['answer']}" for c in clarifications
+            )
+            or "None yet."
+        )
+        resp = llm.invoke(
+            [
+                SystemMessage(
+                    content=INTERROGATION_ROUND_PROMPT.format(
+                        round=round_num,
+                        max_rounds=max_rounds,
+                        user_request=user_request,
+                        previous_qa=previous_qa,
+                    )
+                ),
+                HumanMessage(
+                    content="Generate the next set of clarification questions."
+                ),
+            ]
+        )
+        _, raw = strip_thinking(resp.content)
+        data = parse_json_safe(raw)
+        questions: list[str] = data.get("questions", [])
+        done: bool = data.get("done", False)
+
+        if not questions or done:
+            break
+
+        for q in questions:
+            answer = callback(q, []) or "No preference / not applicable"
+            if not answer.strip():
+                answer = "No preference / not applicable"
+            clarifications.append({"question": q, "answer": answer})
 
         if done:
             break
@@ -224,9 +287,15 @@ def architect_node(state: AgentState) -> dict:
     user_request = state["user_request"]
     memory = ""
     reasoning_logs: list[dict] = []
+    _emit = state.get("emit_callback")
+
+    def _log(entry: dict) -> None:
+        reasoning_logs.append(entry)
+        if _emit:
+            _emit(entry)
 
     print(f"\n[PLAN] Analysing: '{user_request}'")
-    reasoning_logs.append(
+    _log(
         {
             "agent": "architect",
             "phase": "plan",
@@ -236,7 +305,7 @@ def architect_node(state: AgentState) -> dict:
 
     # ── Step 1: Classify scope ───────────────────────────────────────────────
     scope, needs_interrogation = _classify_scope(llm, user_request)
-    reasoning_logs.append(
+    _log(
         {
             "agent": "architect",
             "phase": "classify",
@@ -244,13 +313,25 @@ def architect_node(state: AgentState) -> dict:
         }
     )
 
-    # ── Step 2: Interrogation (CLI mode only) ────────────────────────────────
+    # ── Step 2: Interrogation ────────────────────────────────────────────────
     clarifications: list[dict] = []
-    if needs_interrogation and interactive:
+    callback = state.get("clarification_callback")
+    if needs_interrogation and callback:
+        clarifications = _interrogate_api(
+            llm, user_request, MAX_INTERROGATION_ROUNDS, callback
+        )
+        _log(
+            {
+                "agent": "architect",
+                "phase": "interrogation",
+                "content": f"{len(clarifications)} clarification(s) collected via API.",
+            }
+        )
+    elif needs_interrogation and interactive:
         clarifications = _interrogate(
             llm, user_request, MAX_INTERROGATION_ROUNDS
         )
-        reasoning_logs.append(
+        _log(
             {
                 "agent": "architect",
                 "phase": "interrogation",
@@ -258,7 +339,7 @@ def architect_node(state: AgentState) -> dict:
             }
         )
     elif needs_interrogation:
-        reasoning_logs.append(
+        _log(
             {
                 "agent": "architect",
                 "phase": "interrogation",
@@ -267,7 +348,11 @@ def architect_node(state: AgentState) -> dict:
         )
 
     # ── Step 3: Build context + compress if needed ───────────────────────────
+    mode = state.get("mode", "senior")
+    mode_note = MODE_PREAMBLE.get(mode, MODE_PREAMBLE["senior"])
     context = _build_context(user_request, clarifications)
+    if mode_note:
+        context = f"## Mode instruction\n{mode_note}\n\n{context}"
     memory = maybe_compress(llm, context, memory, MEMORY_COMPRESS_PROMPT)
     memory_section = (
         f"## Memory / previous context\n{memory}\n\n" if memory else ""
@@ -279,6 +364,7 @@ def architect_node(state: AgentState) -> dict:
     feedback = ""
 
     for iteration in range(1, MAX_DESIGN_ITERATIONS + 1):
+        raise_if_cancelled()
         print(f"[ACT]  Design iteration {iteration}/{MAX_DESIGN_ITERATIONS} …")
 
         if scope in ("function", "feature"):
@@ -318,7 +404,7 @@ def architect_node(state: AgentState) -> dict:
             )
 
         specs, diagrams = _parse_output(raw)
-        reasoning_logs.append(
+        _log(
             {
                 "agent": "architect",
                 "phase": "act",
@@ -329,7 +415,7 @@ def architect_node(state: AgentState) -> dict:
 
         # Self-critique
         critique_issues = _self_critique(llm, specs, diagrams)
-        reasoning_logs.append(
+        _log(
             {
                 "agent": "architect",
                 "phase": "self_critique",
@@ -347,7 +433,7 @@ def architect_node(state: AgentState) -> dict:
         # API mode: auto-approve after self-critique passes
         if not interactive:
             approved = True
-            reasoning_logs.append(
+            _log(
                 {
                     "agent": "architect",
                     "phase": "validate",
@@ -373,9 +459,20 @@ def architect_node(state: AgentState) -> dict:
 
     reason_trace = f"Final: {len(specs)}c specs, {len(diagrams)}c diagrams."
     print(f"[REASON] {reason_trace}\n")
-    reasoning_logs.append(
-        {"agent": "architect", "phase": "reason", "content": reason_trace}
-    )
+    _log({"agent": "architect", "phase": "reason", "content": reason_trace})
+
+    run_output_dir = state.get("run_output_dir", "")
+    if run_output_dir:
+        output_dir = (Path(run_output_dir) / "output").resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if specs:
+            (output_dir / "specifications.md").write_text(
+                specs, encoding="utf-8"
+            )
+        if diagrams:
+            (output_dir / "c4_diagrams.md").write_text(
+                diagrams, encoding="utf-8"
+            )
 
     return {
         "scope": scope,
