@@ -34,18 +34,17 @@ from graph.prompts.architect_prompts import (
 )
 from graph.state import AgentState
 from integrations.cortex import get_cortex_llm
-from utils.node import maybe_compress, parse_json_safe, strip_thinking
+from utils.node import (
+    get_mode_preamble,
+    maybe_compress,
+    parse_json_safe,
+    strip_thinking,
+)
 
 
 MAX_INTERROGATION_ROUNDS = 3
 MAX_DESIGN_ITERATIONS = 3
 COMPRESS_THRESHOLD = 5000
-
-MODE_PREAMBLE: dict[str, str] = {
-    "junior": "Generate a simple, minimal implementation. Focus on clarity over completeness.",
-    "senior": "Generate a well-structured, production-quality implementation with clear separation of concerns.",
-    "expert": "Generate an enterprise-grade implementation with full observability, scalability, and security considerations.",
-}
 
 
 def _is_interactive() -> bool:
@@ -349,7 +348,7 @@ def architect_node(state: AgentState) -> dict:
 
     # ── Step 3: Build context + compress if needed ───────────────────────────
     mode = state.get("mode", "senior")
-    mode_note = MODE_PREAMBLE.get(mode, MODE_PREAMBLE["senior"])
+    mode_note = get_mode_preamble(mode)
     context = _build_context(user_request, clarifications)
     if mode_note:
         context = f"## Mode instruction\n{mode_note}\n\n{context}"
@@ -393,8 +392,29 @@ def architect_node(state: AgentState) -> dict:
                 HumanMessage(content=context),
             ]
 
-        d_resp = llm.invoke(messages)
-        thinking, raw = strip_thinking(d_resp.content)
+        # Stream the design so the UI shows progress in real-time.
+        # Emit only periodic progress updates (every 500 chars) to avoid
+        # flooding the log with one line per token.
+        raw_chunks: list[str] = []
+        _emitted_len = 0
+        _emit_interval = 500
+        for chunk in llm.stream(messages):
+            token = chunk.content if hasattr(chunk, "content") else str(chunk)
+            if token:
+                raw_chunks.append(token)
+                if _emit:
+                    total = sum(len(c) for c in raw_chunks)
+                    if total - _emitted_len >= _emit_interval:
+                        _emitted_len = total
+                        _emit(
+                            {
+                                "agent": "architect",
+                                "phase": "act",
+                                "content": f"Designing… {total} chars",
+                            }
+                        )
+        raw = "".join(raw_chunks)
+        thinking, raw = strip_thinking(raw)
         if thinking:
             print(
                 f"[THINKING — design {iteration}]\n"
@@ -413,8 +433,31 @@ def architect_node(state: AgentState) -> dict:
             }
         )
 
-        # Self-critique
-        if scope not in ("function", "feature"):
+        # Lightweight scope skips all validation
+        if scope in ("function", "feature"):
+            approved = True
+            break
+
+        # Expert and junior modes are fully autonomous — no human review of specs.
+        # Expert: zero human-in-the-loop, highest code quality, runs to completion.
+        # Junior: same autonomous generation, then exercise packager strips it into stubs.
+        # Senior: human reviews specs once before developer starts.
+        if mode in ("expert", "junior"):
+            approved = True
+            _log(
+                {
+                    "agent": "architect",
+                    "phase": "validate",
+                    "content": f"{mode.capitalize()} mode — auto-approved specs, proceeding autonomously.",
+                }
+            )
+            break
+
+        # Self-critique only runs in interactive CLI mode where its output feeds
+        # into _validate_with_user and the human can request a revision.
+        # In API mode the result is never shown to the user so it would be a
+        # wasted LLM call.
+        if interactive and scope not in ("function", "feature"):
             critique_issues = _self_critique(llm, specs, diagrams)
             reasoning_logs.append(
                 {
@@ -426,13 +469,84 @@ def architect_node(state: AgentState) -> dict:
                 }
             )
 
-        # Lightweight scope skips user validation
-        if scope in ("function", "feature"):
-            approved = True
-            break
-
-        # API mode: auto-approve after self-critique passes
+        # API mode: request specs approval — senior mode only.
         if not interactive:
+            _specs_review_callback = state.get("clarification_callback")
+            _needs_review = (
+                scope in ("system", "product")
+                and _specs_review_callback is not None
+                and mode == "senior"
+            )
+            if _needs_review:
+                _log(
+                    {
+                        "agent": "architect",
+                        "phase": "specs_review",
+                        "content": "Waiting for specs approval before developer starts.",
+                    }
+                )
+                # Emit a special specs_review_request event — reuse the
+                # clarification_callback so we don't need a new callback type.
+                # Embed the full specs after a sentinel so service.py can
+                # extract and include it in the WebSocket payload.
+                _review_question = (
+                    "Please review the generated specifications. "
+                    "Reply 'approve' (or leave blank) to proceed, "
+                    "or describe changes you want."
+                    "\n\n===SPECS_CONTENT===\n" + specs
+                )
+                answer = _specs_review_callback(
+                    _review_question,
+                    ["approve | Proceed to code generation as-is"],
+                )
+                answer = (answer or "").strip()
+                if answer.lower() in (
+                    "",
+                    "approve",
+                    "approved",
+                    "ok",
+                    "y",
+                    "yes",
+                ):
+                    approved = True
+                    _log(
+                        {
+                            "agent": "architect",
+                            "phase": "specs_review",
+                            "content": "Specs approved by user.",
+                        }
+                    )
+                    break
+                # Senior: user edited the specs file directly — use their content
+                # immediately without re-generating (they are the architect).
+                if mode == "senior" and len(answer) > 50:
+                    specs = answer
+                    approved = True
+                    _log(
+                        {
+                            "agent": "architect",
+                            "phase": "specs_review",
+                            "content": "Specs updated from user edits — proceeding to development.",
+                        }
+                    )
+                    break
+                # CLI/interactive mode: treat answer as revision feedback for LLM
+                feedback = answer
+                _log(
+                    {
+                        "agent": "architect",
+                        "phase": "specs_review",
+                        "content": f"Revision requested: {feedback[:100]}…",
+                    }
+                )
+                memory = maybe_compress(
+                    llm,
+                    f"Revision feedback: {feedback}",
+                    memory,
+                    MEMORY_COMPRESS_PROMPT,
+                )
+                memory_section = f"## Memory / previous context\n{memory}\n\n"
+                continue
             approved = True
             _log(
                 {
@@ -475,22 +589,12 @@ def architect_node(state: AgentState) -> dict:
                 diagrams, encoding="utf-8"
             )
 
-    run_output_dir = state.get("run_output_dir", "")
-    if run_output_dir:
-        output_dir = (Path(run_output_dir) / "output").resolve()
-        output_dir.mkdir(parents=True, exist_ok=True)
-        if specs:
-            (output_dir / "specifications.md").write_text(
-                specs, encoding="utf-8"
-            )
-        if diagrams:
-            (output_dir / "c4_diagrams.md").write_text(
-                diagrams, encoding="utf-8"
-            )
-
     return {
         "scope": scope,
         "specs": specs,
         "diagrams": diagrams,
+        "specs_approved": approved,
+        "specs_revision_feedback": feedback or "",
+        "awaiting_specs_approval": False,
         "reasoning_logs": reasoning_logs,
     }

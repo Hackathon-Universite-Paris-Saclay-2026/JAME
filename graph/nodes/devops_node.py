@@ -26,14 +26,14 @@ from graph.prompts.devops_prompts import (
 )
 from graph.state import AgentState, SingleFileContent
 from integrations.cortex import get_cortex_llm
-from utils.node import maybe_compress, run_parallel
+from utils.node import get_mode_preamble, maybe_compress, run_parallel
 
 
 # ── Known file sets (path → FILE_HINT key) ────────────────────────────────────
 
 _CI_FILE_HINTS: dict[str, str] = {
     ".github/workflows/ci.yml": FILE_HINT["ci_workflow"],
-    "requirements-dev.txt": FILE_HINT["requirements_dev"],
+    "requirements-dev.txt": FILE_HINT["dev_deps"],
     "pyproject.toml": FILE_HINT["pyproject_toml"],
     ".gitignore": FILE_HINT["gitignore"],
     "Makefile": FILE_HINT["makefile"],
@@ -253,15 +253,65 @@ def _collect_file_tasks(
     return tasks, meta
 
 
-def _is_degenerate(content: str, file_path: str) -> bool:
-    """Return True when the LLM returned a placeholder instead of real content.
+_REASONING_LEAK_PHRASES = (
+    "the user provided",
+    "the specifications",
+    "this is a critical",
+    "however, the generated",
+    "the correct approach",
+    "the assistant should",
+    "i need to",
+    "i will ",
+    "let me ",
+    "note that",
+    "as per the",
+    "it seems",
+    "the user might",
+    "this would be",
+)
 
-    Catches the case where deepseek-r1 echoes the filename (or its basename)
-    into the content field instead of generating actual file content.
+
+def _is_degenerate(content: str, file_path: str) -> bool:
+    """Return True when the LLM returned a placeholder or reasoning instead of real content.
+
+    Catches:
+    - deepseek-r1 echoing the filename instead of generating content
+    - LLM outputting reasoning/analysis prose instead of file content
     """
     stripped = content.strip()
     basename = file_path.split("/")[-1]
-    return stripped in (file_path, basename) or len(stripped) < 10
+    if stripped in (file_path, basename) or len(stripped) < 10:
+        return True
+    # Detect reasoning leak: prose starting with analysis instead of code/config
+    first = stripped[:300].lower()
+    code_starters = (
+        "#!",
+        "#",
+        "//",
+        "/*",
+        "package ",
+        "import ",
+        "from ",
+        "const ",
+        "let ",
+        "var ",
+        "function ",
+        "class ",
+        "module",
+        "def ",
+        "{",
+        "[",
+        "---",
+        "version:",
+        "name:",
+        "from ",
+        "run ",
+        "copy ",
+        "<",
+    )
+    if any(first.startswith(s) for s in code_starters):
+        return False
+    return any(phrase in first for phrase in _REASONING_LEAK_PHRASES)
 
 
 def _generate_file(
@@ -385,6 +435,8 @@ def devops_node(state: AgentState) -> dict:
     )
     llm = get_cortex_llm(model="deepseek-r1", temperature=0.1, max_tokens=4096)
 
+    mode = state.get("mode", "senior")
+    mode_note = get_mode_preamble(mode)
     specs = state.get("specs", "")
     code_files = state.get("code_files", [])
     file_list = (
@@ -397,6 +449,7 @@ def devops_node(state: AgentState) -> dict:
     )
     # Full context for decision and planning (needs complete specs for accuracy).
     context = (
+        f"## Mode\n{mode_note}\n\n"
         f"## Application Specifications\n{specs}\n\n"
         f"## Generated Source Files\n{file_list}"
     )

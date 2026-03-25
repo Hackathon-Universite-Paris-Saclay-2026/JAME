@@ -20,6 +20,47 @@ from integrations.github import auto_commit, init_repo
 
 
 # ---------------------------------------------------------------------------
+# Mode preamble
+# ---------------------------------------------------------------------------
+
+_MODE_PREAMBLES: dict[str, str] = {
+    "junior": (
+        # Junior generates the same expert-quality golden solution as expert mode.
+        # The exercise packager then strips it into stubs for the learner to implement.
+        # Clean, well-structured code is essential so the learner has a good reference.
+        "Generate an enterprise-grade implementation. "
+        "Apply advanced patterns (SOLID, DRY, appropriate design patterns), "
+        "observability hooks, and full error-handling strategies. "
+        "Write clean, well-commented code — it serves as the reference solution "
+        "for a learning exercise."
+    ),
+    "senior": (
+        "Generate a well-structured, production-quality implementation. "
+        "Apply best practices, handle errors, and add concise inline comments "
+        "where non-obvious."
+    ),
+    "expert": (
+        "Generate an enterprise-grade implementation. "
+        "Apply advanced patterns (SOLID, DRY, appropriate design patterns), "
+        "observability hooks, and full error-handling strategies."
+    ),
+}
+
+
+def get_mode_preamble(mode: str) -> str:
+    """Return the mode-specific behaviour preamble for prompt injection.
+
+    Args:
+        mode: One of ``"junior"``, ``"senior"``, or ``"expert"``.
+
+    Returns:
+        A short instruction string appropriate for the given mode.
+        Falls back to the senior preamble for unknown values.
+    """
+    return _MODE_PREAMBLES.get(mode, _MODE_PREAMBLES["senior"])
+
+
+# ---------------------------------------------------------------------------
 # Parallel execution
 # ---------------------------------------------------------------------------
 

@@ -17,7 +17,11 @@ Architecture enforced across all generated projects:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
+import shutil
+import subprocess
+import sys
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -44,7 +48,7 @@ from graph.state import (
     _sanitize_path,
 )
 from integrations.cortex import get_cortex_llm
-from utils.node import strip_thinking
+from utils.node import get_mode_preamble, strip_thinking
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +372,88 @@ def _build_file_prompt(
     return msg
 
 
+_REASONING_LEAK_PHRASES = (
+    "the user provided",
+    "the specifications",
+    "this is a critical",
+    "however, the generated",
+    "the correct approach",
+    "the assistant should",
+    "i need to",
+    "i will ",
+    "let me ",
+    "note that",
+    "as per the",
+    "it seems",
+    "the user might",
+    "this would be",
+)
+
+
+def _looks_like_reasoning(content: str) -> bool:
+    """Return True if the content starts with LLM reasoning prose instead of file content."""
+    first = content.lstrip()[:300].lower()
+    # Code/config files start with keywords, punctuation, or specific characters
+    code_starters = (
+        "#!",
+        "#",
+        "//",
+        "/*",
+        "package ",
+        "import ",
+        "from ",
+        "const ",
+        "let ",
+        "var ",
+        "function ",
+        "class ",
+        "module",
+        "def ",
+        "{",
+        "[",
+        "---",
+        "version:",
+        "name:",
+        "FROM ",
+        "RUN ",
+        "COPY ",
+        "<",
+    )
+    if any(first.startswith(s.lower()) for s in code_starters):
+        return False
+    return any(phrase in first for phrase in _REASONING_LEAK_PHRASES)
+
+
+def _strip_reasoning_leak(
+    llm: BaseChatModel, file_path: str, content: str, original_prompt: str
+) -> str:
+    """If content looks like reasoning prose, retry with a strict raw-only prompt."""
+    if not _looks_like_reasoning(content):
+        return content
+
+    _log(
+        "high", "ACT", f"Reasoning leak detected for {file_path} — retrying raw"
+    )
+    messages = [
+        SystemMessage(
+            content=(
+                "Output ONLY the raw file content. "
+                "Do not write any explanation, analysis, or reasoning. "
+                "The very first character must be the first character of the file."
+            )
+        ),
+        HumanMessage(content=original_prompt),
+    ]
+    try:
+        _, retried = strip_thinking(llm.invoke(messages).content)
+        retried = _strip_markdown_fences(retried)
+        if retried.strip() and not _looks_like_reasoning(retried):
+            return retried
+    except Exception:  # noqa: S110
+        pass
+    return content  # return original if retry also fails
+
+
 def _generate_file(
     llm: BaseChatModel,
     file_path: str,
@@ -394,6 +480,12 @@ def _generate_file(
     content = _strip_markdown_fences(content)
     if not content.strip():
         _log("high", "ACT", f"Empty content for {file_path}, skipping")
+        return None
+
+    # Detect reasoning/analysis leak — LLM outputting prose instead of file content.
+    # Triggered when the response starts with natural-language sentences (not code/config).
+    content = _strip_reasoning_leak(llm, file_path, content, user_msg)
+    if not content:
         return None
 
     if project_dir is not None:
@@ -560,8 +652,15 @@ def _run_code_generation(
     qa_feedback: str,
     iteration: int,
     project_dir: Path | None = None,
+    emit_fn: Callable | None = None,
+    stream_files: bool = True,
 ) -> tuple[list[dict], dict[str, dict]]:
-    """Generate all planned files. Returns ``(code_files, generated_map)``."""
+    """Generate all planned files. Returns ``(code_files, generated_map)``.
+
+    If ``emit_fn`` is provided and ``stream_files`` is True, emits a
+    ``file_generated`` event immediately after each file is generated so the
+    UI can display files in real-time rather than waiting for the whole node.
+    """
     code_files: list[dict] = []
     generated: dict[str, dict] = {}
 
@@ -591,6 +690,19 @@ def _run_code_generation(
         if result:
             code_files.append(result)
             generated[file_path] = result
+            # Stream the file to the UI immediately (senior/expert modes only)
+            if emit_fn and stream_files:
+                emit_fn(
+                    {
+                        "event": "file_generated",
+                        "agent": "developer",
+                        "phase": "CONSTRUCTION",
+                        "path": result.get("path", file_path),
+                        "content": result.get("content", ""),
+                        "language": result.get("language", "text"),
+                        "message": f"Generated: {result.get('path', file_path)}",
+                    }
+                )
 
     # Preserve existing files that were not regenerated on retry.
     if iteration > 0 and existing_files:
@@ -825,6 +937,44 @@ def _run_lightweight(
 
 
 # ---------------------------------------------------------------------------
+# Ruff search/replace fix
+# ---------------------------------------------------------------------------
+
+
+def _apply_ruff_fixes(
+    project_dir: Path, code_files: list[dict]
+) -> tuple[list[dict], bool]:
+    """Run ``ruff check --fix --unsafe-fixes`` on *project_dir* and reload content.
+
+    Returns ``(updated_code_files, any_fix_applied)``.  Only the files that
+    changed on disk are updated; unchanged files are returned as-is.
+    """
+    ruff_bin = shutil.which("ruff") or sys.executable.replace("python", "ruff")
+    if not ruff_bin or not project_dir.exists():
+        return code_files, False
+
+    result = subprocess.run(  # noqa: S603
+        [ruff_bin, "check", "--fix", "--unsafe-fixes", str(project_dir)],
+        capture_output=True,
+        text=True,
+        cwd=str(project_dir),
+    )
+    fixed = result.returncode == 0 or "Fixed" in (result.stdout + result.stderr)
+    if not fixed:
+        return code_files, False
+
+    updated: list[dict] = []
+    for f in code_files:
+        dest = project_dir / f["path"]
+        if dest.exists():
+            new_content = dest.read_text(encoding="utf-8")
+            if new_content != f.get("content", ""):
+                f = {**f, "content": new_content}
+        updated.append(f)
+    return updated, True
+
+
+# ---------------------------------------------------------------------------
 # Main node
 # ---------------------------------------------------------------------------
 
@@ -864,7 +1014,122 @@ def developer_node(state: AgentState) -> dict:
     qa_issues = state.get("qa_issues", [])
     iteration = state.get("iteration", 0)
 
+    # ── Mode-aware preamble + senior prompt queue injection ──────
+    mode = state.get("mode", "senior")
+    mode_note = get_mode_preamble(mode)
+
+    # Consume queued instructions — prepend to specs context for this iteration.
+    # Available to all modes: any human can inject instructions via the queue.
+    senior_queue: list[str] = list(state.get("senior_prompt_queue", []))
+    senior_instructions = ""
+    if senior_queue:
+        senior_instructions = (
+            "\n\n## Developer instructions (queued by user):\n"
+            + "\n".join(f"- {p}" for p in senior_queue)
+        )
+        _log(
+            {
+                "agent": "developer",
+                "phase": "plan",
+                "content": f"Applying {len(senior_queue)} queued instruction(s).",
+            }
+        )
+
+    # Prepend mode note and queued instructions to specs for this iteration.
+    augmented_specs = (
+        f"## Mode instruction\n{mode_note}\n\n{specs}{senior_instructions}"
+    )
+
     # ── Lightweight path: function / feature scope ───────────────
+    if scope in LIGHTWEIGHT_SCOPES and iteration > 0:
+        # Retry after QA failure.
+        # Step 1: apply ruff --fix in-place (no LLM).
+        # Step 2: if blocking issues remain, regenerate only the flagged files
+        #         using the lightweight generator with exact error context.
+        # Never runs the full 4-phase pipeline for lightweight scopes.
+        _lw_run_output_dir = state.get("run_output_dir", "")
+        _lw_project_dir: Path | None = None
+        if _lw_run_output_dir:
+            _lw_project_dir = (
+                Path(_lw_run_output_dir) / "output" / "project"
+            ).resolve()
+        _existing_files_raw = list(state.get("code_files", []))
+        _existing_dicts = [
+            f if isinstance(f, dict) else f.model_dump()
+            for f in _existing_files_raw
+        ]
+
+        # Step 1 — ruff fix
+        if _lw_project_dir and _existing_dicts:
+            print("\n[ACT]  Lightweight retry — applying ruff fixes …")
+            _fixed_files, _any_fixed = _apply_ruff_fixes(
+                _lw_project_dir, _existing_dicts
+            )
+            if _any_fixed:
+                _existing_dicts = _fixed_files
+
+        # Step 2 — targeted LLM regeneration of flagged files only
+        # qa_feedback now contains exact tool lines ("- [pytest] FAILED ...")
+        if qa_feedback:
+            # Determine which files need regeneration from the feedback
+            _flagged: list[str] = []
+            for _fd in _existing_dicts:
+                _p = _fd.get("path", "")
+                if _p in qa_feedback or _p.split("/")[-1] in qa_feedback:
+                    _flagged.append(_p)
+            # If nothing matched explicitly, flag test files (pytest failures)
+            if not _flagged and "[pytest]" in qa_feedback:
+                _flagged = [
+                    _fd["path"]
+                    for _fd in _existing_dicts
+                    if "test" in _fd.get("path", "").lower()
+                ]
+            # Regenerate only flagged files
+            _existing_map = {f["path"]: f for f in _existing_dicts}
+            gen_prompt = LIGHTWEIGHT_GENERATE_SYSTEM_PROMPT.format(scope=scope)
+            for _fpath in _flagged:
+                raise_if_cancelled()
+                print(f"\n[ACT]  Targeted fix: regenerating {_fpath} …")
+                _ctx = (
+                    f"## Specifications\n{augmented_specs}\n\n"
+                    f"## Exact errors to fix (change ONLY what is needed)\n{qa_feedback}\n\n"
+                    f"## File to regenerate\nPath: `{_fpath}`"
+                    + _resolve_all_generated(_existing_map)
+                )
+                _content = _invoke_llm(
+                    llm, gen_prompt, _ctx, schema=SingleFileContent, phase="ACT"
+                )
+                if _content:
+                    _content = _strip_markdown_fences(_content)
+                if _content and _content.strip():
+                    if _lw_project_dir:
+                        _dest = _lw_project_dir / _fpath
+                        _dest.parent.mkdir(parents=True, exist_ok=True)
+                        _dest.write_text(_content, encoding="utf-8")
+                    _existing_map[_fpath] = {
+                        "path": _fpath,
+                        "content": _content,
+                        "language": _detect_language(_fpath),
+                    }
+                    print(f"[ACT]    ✓ {len(_content)} chars")
+
+            _result_files = list(_existing_map.values())
+        else:
+            _result_files = _existing_dicts
+
+        reason = (
+            f"Lightweight retry: ruff fixed in-place, "
+            f"{len(list(_result_files))} file(s) ready."
+        )
+        print(f"\n[REASON] {reason}\n")
+        _log({"agent": "developer", "phase": "reason", "content": reason})
+        return {
+            "functional_design": state.get("functional_design", ""),
+            "code_files": _result_files,
+            "reasoning_logs": [],
+            "senior_prompt_queue": [],
+        }
+
     if scope in LIGHTWEIGHT_SCOPES and iteration == 0:
         print(
             f"\n\u26a1 Lightweight mode ({scope}) \u2014 skipping full-stack pipeline"
@@ -883,7 +1148,12 @@ def developer_node(state: AgentState) -> dict:
                 "content": f"Lightweight scope ({scope}) — minimal file set.",
             }
         )
-        code_files = _run_lightweight(llm, scope, specs, lw_project_dir)
+        code_files = _run_lightweight(
+            llm,
+            scope,
+            augmented_specs,
+            lw_project_dir,
+        )
         file_list = (
             ", ".join(f["path"] for f in code_files) if code_files else "(none)"
         )
@@ -926,7 +1196,7 @@ def developer_node(state: AgentState) -> dict:
                 "content": "Extracting functional design…",
             }
         )
-        functional_design = _run_functional_design(llm, specs)
+        functional_design = _run_functional_design(llm, augmented_specs)
         design_trace = (
             f"Extracted functional design ({len(functional_design)} chars): "
             "domain entities, business rules, API endpoints, NFR considerations."
@@ -947,7 +1217,7 @@ def developer_node(state: AgentState) -> dict:
     )
     file_plan, plan_trace = _run_file_planning(
         llm,
-        specs,
+        augmented_specs,
         functional_design,
         qa_issues,
         qa_feedback,
@@ -970,16 +1240,21 @@ def developer_node(state: AgentState) -> dict:
         }
     )
     existing_files = {f["path"]: f for f in state.get("code_files", [])}
+    # Stream files to UI in real-time for senior/expert modes; junior keeps files
+    # hidden until the exercise packager replaces them with stubs.
+    _stream_files = mode != "junior"
     code_files, generated = _run_code_generation(
         llm,
         file_plan,
-        specs,
+        augmented_specs,
         functional_design,
         existing_files,
         qa_issues,
         qa_feedback,
         iteration,
         project_dir,
+        emit_fn=_emit,
+        stream_files=_stream_files,
     )
     _log(
         {
@@ -1022,9 +1297,13 @@ def developer_node(state: AgentState) -> dict:
     print(f"\n[REASON] {reason_trace}\n")
     _log({"agent": "developer", "phase": "reason", "content": reason_trace})
 
+    # Clear consumed senior instructions from queue
+    updated_queue: list[str] = []  # queue was fully consumed this iteration
+
     return {
         "functional_design": functional_design,
         "code_files": code_files,
+        "senior_prompt_queue": updated_queue,
         "reasoning_logs": [
             {"agent": "developer", "phase": "design", "content": design_trace},
             {"agent": "developer", "phase": "plan", "content": plan_trace},

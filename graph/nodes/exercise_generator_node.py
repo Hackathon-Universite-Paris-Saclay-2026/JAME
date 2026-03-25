@@ -1,15 +1,15 @@
-"""Stripper node — Learning Mode Ghost Agent.
+"""Exercise Packager node — Learning Mode Agent.
 
 Transforms the Developer's golden solution into a learning exercise by:
 
   [ANALYZE]  Identify which functions/methods contain non-trivial business
              logic worth implementing as a learning objective.
-  [STRIP]    Replace each identified block with a valid typed stub + TODO
+  [PACKAGE]  Replace each identified block with a valid typed stub + TODO
              comment, so the IDE's LSP remains happy (no red squiggles).
-  [PACKAGE]  Emit golden_files (hidden reference), exercise_files (stubs),
+  [DELIVER]  Emit golden_files (hidden reference), exercise_files (stubs),
              learning_objectives, and progressive hints for each block.
 
-Files never stripped: config, tests, frontend, entry points.
+Files left intact: config, tests, frontend, entry points.
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ _SKIP_PATTERNS = (
 
 
 def _should_skip(path: str) -> bool:
-    """Return True for files that should never be stripped."""
+    """Return True for files that should be kept as-is (not converted to stubs)."""
     lower = path.lower()
     return any(pat in lower for pat in _SKIP_PATTERNS)
 
@@ -113,13 +113,13 @@ def exercise_generator_node(state: AgentState) -> dict:
 
     # ── [ANALYZE] Identify learning blocks ───────────────────────────────────
     print("\n" + "=" * 60)
-    print("🎓  STRIPPER AGENT — Learning Mode")
+    print("🎓  EXERCISE PACKAGER AGENT — Learning Mode")
     print("=" * 60)
-    print("[ANALYZE] Identifying business logic blocks to strip …")
+    print("[ANALYZE] Identifying business logic blocks to convert to stubs …")
 
     _log(
         {
-            "agent": "stripper",
+            "agent": "exercise_generator",
             "phase": "plan",
             "content": "[ANALYZE] Scanning generated files for non-trivial business logic …",
         }
@@ -148,13 +148,13 @@ def exercise_generator_node(state: AgentState) -> dict:
     print(f"[ANALYZE] {len(analysis)} file(s) with learning blocks identified.")
     _log(
         {
-            "agent": "stripper",
+            "agent": "exercise_generator",
             "phase": "reason",
-            "content": f"[ANALYZE] {len(analysis)} file(s) selected for stripping.",
+            "content": f"[ANALYZE] {len(analysis)} file(s) selected for stub conversion.",
         }
     )
 
-    # ── [STRIP] Replace blocks with typed stubs ──────────────────────────────
+    # ── [PACKAGE] Replace blocks with typed stubs ────────────────────────────
     exercise_files: list[CodeFile] = []
     learning_objectives: list[str] = []
     hints: list[str] = []
@@ -177,17 +177,17 @@ def exercise_generator_node(state: AgentState) -> dict:
         block_list = "\n".join(
             f"- {b['function_name']}: {b['objective']}" for b in blocks
         )
-        print(f"[STRIP] {path} ({len(blocks)} block(s)) …")
+        print(f"[PACKAGE] {path} ({len(blocks)} block(s)) …")
         logs.append(
             {
-                "agent": "stripper",
+                "agent": "exercise_generator",
                 "phase": "act",
-                "content": f"[STRIP] Stripping {path} → {len(blocks)} TODO block(s).",
+                "content": f"[PACKAGE] Converting {path} → {len(blocks)} TODO stub(s).",
             }
         )
 
         strip_prompt = (
-            f"File to strip: {path}\n\n"
+            f"File to convert to stubs: {path}\n\n"
             f"Functions/methods to replace with stubs:\n{block_list}\n\n"
             f"Original file content:\n{original.content}"
         )
@@ -226,17 +226,17 @@ def exercise_generator_node(state: AgentState) -> dict:
                 learning_objectives.append(f"{path}::{fn} — {obj}")
                 hints.append(f"[{fn}] {reason}. Focus on: {obj}")
 
-    # Files that were not stripped: carry them over as-is into exercise_files
-    stripped_paths = {f.path for f in exercise_files}
+    # Files that were not converted to stubs: carry them over as-is into exercise_files
+    stubbed_paths = {f.path for f in exercise_files}
     for f in code_files:
-        if f.path not in stripped_paths:
+        if f.path not in stubbed_paths:
             exercise_files.append(f)
 
     print(f"[PACKAGE] {len(exercise_files)} exercise file(s) ready.")
     print(f"[PACKAGE] {len(learning_objectives)} learning objective(s).")
     _log(
         {
-            "agent": "stripper",
+            "agent": "exercise_generator",
             "phase": "reason",
             "content": (
                 f"[PACKAGE] Exercise ready — {len(learning_objectives)} objective(s) "
