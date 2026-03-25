@@ -397,14 +397,14 @@ def architect_node(state: AgentState) -> dict:
         # flooding the log with one line per token.
         raw_chunks: list[str] = []
         _emitted_len = 0
-        _EMIT_INTERVAL = 500
+        _emit_interval = 500
         for chunk in llm.stream(messages):
             token = chunk.content if hasattr(chunk, "content") else str(chunk)
             if token:
                 raw_chunks.append(token)
                 if _emit:
                     total = sum(len(c) for c in raw_chunks)
-                    if total - _emitted_len >= _EMIT_INTERVAL:
+                    if total - _emitted_len >= _emit_interval:
                         _emitted_len = total
                         _emit(
                             {

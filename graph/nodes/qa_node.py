@@ -443,7 +443,7 @@ def _ruff_autofix(
         cwd=str(project_dir),
     )
 
-    # Pass 2: suppress unfixable style-only violations with inline # noqa comments
+    # Pass 2: suppress unfixable style-only violations with inline
     check_result = subprocess.run(  # noqa: S603
         [ruff_bin, "check", "--output-format=json", str(project_dir)],
         capture_output=True,
@@ -480,7 +480,7 @@ def _ruff_autofix(
                 if 0 <= idx < len(lines):
                     codes_str = ", ".join(sorted(line_codes[line_no]))
                     stripped = lines[idx].rstrip("\n").rstrip("\r")
-                    eol = lines[idx][len(stripped):]
+                    eol = lines[idx][len(stripped) :]
                     if "# noqa" in stripped:
                         # Append codes to existing noqa comment
                         stripped = stripped + ", " + codes_str
@@ -811,7 +811,9 @@ def qa_node(state: AgentState) -> dict:
         # developer gets precise line-level feedback instead of LLM hallucinations.
         if is_lightweight:
             blocking = [i for i in tool_issues if i.severity != "minor"]
-            pytest_issues = [i for i in tool_issues if "[pytest]" in i.description]
+            pytest_issues = [
+                i for i in tool_issues if "[pytest]" in i.description
+            ]
             if not blocking and not pytest_issues:
                 print(
                     "\n[AI-DLC] Lightweight scope — style warnings only. PASS.\n"

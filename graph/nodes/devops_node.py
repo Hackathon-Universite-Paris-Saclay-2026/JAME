@@ -284,9 +284,31 @@ def _is_degenerate(content: str, file_path: str) -> bool:
         return True
     # Detect reasoning leak: prose starting with analysis instead of code/config
     first = stripped[:300].lower()
-    code_starters = ("#!", "#", "//", "/*", "package ", "import ", "from ", "const ",
-                     "let ", "var ", "function ", "class ", "module", "def ", "{", "[",
-                     "---", "version:", "name:", "from ", "run ", "copy ", "<")
+    code_starters = (
+        "#!",
+        "#",
+        "//",
+        "/*",
+        "package ",
+        "import ",
+        "from ",
+        "const ",
+        "let ",
+        "var ",
+        "function ",
+        "class ",
+        "module",
+        "def ",
+        "{",
+        "[",
+        "---",
+        "version:",
+        "name:",
+        "from ",
+        "run ",
+        "copy ",
+        "<",
+    )
     if any(first.startswith(s) for s in code_starters):
         return False
     return any(phrase in first for phrase in _REASONING_LEAK_PHRASES)

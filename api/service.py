@@ -361,7 +361,9 @@ class OrchestratorService:
                 coro = svc._emit(
                     run_id=run_id,
                     event="file_generated",
-                    message=log.get("message", f"Generated: {log.get('path', '')}"),
+                    message=log.get(
+                        "message", f"Generated: {log.get('path', '')}"
+                    ),
                     agent=log.get("agent", "developer"),
                     phase=log.get("phase", "CONSTRUCTION"),
                     payload={

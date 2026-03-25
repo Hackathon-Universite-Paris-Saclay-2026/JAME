@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import suppress
 from pathlib import Path
+import uuid as _uuid
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -44,7 +45,6 @@ app.add_middleware(
 service = OrchestratorService(output_root=Path("runs"))
 
 
-import uuid as _uuid
 _INSTANCE_ID = str(_uuid.uuid4())
 
 

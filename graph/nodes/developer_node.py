@@ -17,6 +17,7 @@ Architecture enforced across all generated projects:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 import shutil
 import subprocess
@@ -393,9 +394,31 @@ def _looks_like_reasoning(content: str) -> bool:
     """Return True if the content starts with LLM reasoning prose instead of file content."""
     first = content.lstrip()[:300].lower()
     # Code/config files start with keywords, punctuation, or specific characters
-    code_starters = ("#!", "#", "//", "/*", "package ", "import ", "from ", "const ",
-                     "let ", "var ", "function ", "class ", "module", "def ", "{", "[",
-                     "---", "version:", "name:", "FROM ", "RUN ", "COPY ", "<")
+    code_starters = (
+        "#!",
+        "#",
+        "//",
+        "/*",
+        "package ",
+        "import ",
+        "from ",
+        "const ",
+        "let ",
+        "var ",
+        "function ",
+        "class ",
+        "module",
+        "def ",
+        "{",
+        "[",
+        "---",
+        "version:",
+        "name:",
+        "FROM ",
+        "RUN ",
+        "COPY ",
+        "<",
+    )
     if any(first.startswith(s.lower()) for s in code_starters):
         return False
     return any(phrase in first for phrase in _REASONING_LEAK_PHRASES)
@@ -408,13 +431,17 @@ def _strip_reasoning_leak(
     if not _looks_like_reasoning(content):
         return content
 
-    _log("high", "ACT", f"Reasoning leak detected for {file_path} — retrying raw")
+    _log(
+        "high", "ACT", f"Reasoning leak detected for {file_path} — retrying raw"
+    )
     messages = [
-        SystemMessage(content=(
-            "Output ONLY the raw file content. "
-            "Do not write any explanation, analysis, or reasoning. "
-            "The very first character must be the first character of the file."
-        )),
+        SystemMessage(
+            content=(
+                "Output ONLY the raw file content. "
+                "Do not write any explanation, analysis, or reasoning. "
+                "The very first character must be the first character of the file."
+            )
+        ),
         HumanMessage(content=original_prompt),
     ]
     try:
@@ -422,7 +449,7 @@ def _strip_reasoning_leak(
         retried = _strip_markdown_fences(retried)
         if retried.strip() and not _looks_like_reasoning(retried):
             return retried
-    except Exception:
+    except Exception:  # noqa: S110
         pass
     return content  # return original if retry also fails
 
@@ -625,7 +652,7 @@ def _run_code_generation(
     qa_feedback: str,
     iteration: int,
     project_dir: Path | None = None,
-    emit_fn=None,
+    emit_fn: Callable | None = None,
     stream_files: bool = True,
 ) -> tuple[list[dict], dict[str, dict]]:
     """Generate all planned files. Returns ``(code_files, generated_map)``.
@@ -665,15 +692,17 @@ def _run_code_generation(
             generated[file_path] = result
             # Stream the file to the UI immediately (senior/expert modes only)
             if emit_fn and stream_files:
-                emit_fn({
-                    "event": "file_generated",
-                    "agent": "developer",
-                    "phase": "CONSTRUCTION",
-                    "path": result.get("path", file_path),
-                    "content": result.get("content", ""),
-                    "language": result.get("language", "text"),
-                    "message": f"Generated: {result.get('path', file_path)}",
-                })
+                emit_fn(
+                    {
+                        "event": "file_generated",
+                        "agent": "developer",
+                        "phase": "CONSTRUCTION",
+                        "path": result.get("path", file_path),
+                        "content": result.get("content", ""),
+                        "language": result.get("language", "text"),
+                        "message": f"Generated: {result.get('path', file_path)}",
+                    }
+                )
 
     # Preserve existing files that were not regenerated on retry.
     if iteration > 0 and existing_files:
@@ -1090,7 +1119,7 @@ def developer_node(state: AgentState) -> dict:
 
         reason = (
             f"Lightweight retry: ruff fixed in-place, "
-            f"{len([f for f in _result_files])} file(s) ready."
+            f"{len(list(_result_files))} file(s) ready."
         )
         print(f"\n[REASON] {reason}\n")
         _log({"agent": "developer", "phase": "reason", "content": reason})
