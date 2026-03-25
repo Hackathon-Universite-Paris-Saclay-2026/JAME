@@ -15,8 +15,12 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
   private currentRunId?: string;
   /** Actual backend URL after port resolution (may differ from configured URL). */
   private resolvedBackendUrl?: string;
+  /** Backend instance ID from /health — changes on every restart. */
+  private knownInstanceId?: string;
   /** Proposed file contents keyed by relative path, for inline diff editor. */
   private proposedFiles: Map<string, string> = new Map();
+  /** Generated file contents keyed by relative path, from the most recent run. */
+  private generatedFiles: Map<string, string> = new Map();
   /** Output channel that surfaces backend stdout+stderr logs. */
   private outputChannel: vscode.OutputChannel = vscode.window.createOutputChannel("JAME Backend");
 
@@ -27,9 +31,21 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
     return this.proposedFiles.get(filePath) ?? "";
   }
 
+  /** Returns the in-memory proposed files map (live reference). */
+  public getProposedFiles(): Map<string, string> {
+    return this.proposedFiles;
+  }
+
+  /** Returns the in-memory generated files map (live reference). */
+  public getGeneratedFiles(): Map<string, string> {
+    return this.generatedFiles;
+  }
+
   /** Open a VS Code diff editor between workspace file and proposed content. */
   private async openProposedChange(filePath: string, content: string): Promise<void> {
     this.proposedFiles.set(filePath, content);
+    // Also record in generatedFiles so fileReader can find it even without the diff editor open
+    this.generatedFiles.set(filePath, content);
 
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     if (!workspaceRoot) {
@@ -43,31 +59,28 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
     const hadExisting = fs.existsSync(destPath);
     const previousContent = hadExisting ? fs.readFileSync(destPath, "utf8") : null;
 
-    // Write immediately so the file is on disk (not lost if VS Code crashes)
+    // Write immediately so the file is on disk before the diff editor opens.
     fs.mkdirSync(path.dirname(destPath), { recursive: true });
     fs.writeFileSync(destPath, content, "utf8");
 
-    // Open a diff editor showing what changed (previous ↔ new, or empty ↔ new)
-    const proposedUri = vscode.Uri.parse(`jame-proposed:${filePath}`);
+    // Open the diff editor asynchronously (fire-and-forget) so streaming of
+    // subsequent file_generated events is not blocked waiting for the editor.
     const label = `${path.basename(filePath)} (JAME generated)`;
-
     if (hadExisting && previousContent !== null) {
-      // Store the old content under a "previous" key so the diff LHS shows it
       this.proposedFiles.set(`__prev__${filePath}`, previousContent);
-      await vscode.commands.executeCommand(
+      vscode.commands.executeCommand(
         "vscode.diff",
         vscode.Uri.parse(`jame-proposed:__prev__${filePath}`),
         vscode.Uri.file(destPath),
         label
-      );
+      ).then(undefined, () => {/* ignore if tab can't open */});
     } else {
-      // New file — diff against empty to show what was added
-      await vscode.commands.executeCommand(
+      vscode.commands.executeCommand(
         "vscode.diff",
         vscode.Uri.parse("jame-proposed:__empty__"),
         vscode.Uri.file(destPath),
         label
-      );
+      ).then(undefined, () => {/* ignore if tab can't open */});
     }
   }
 
@@ -116,6 +129,10 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
         line?: string;
         toolCallId?: string;
         action?: string;
+        feedback?: string;
+        prompt?: string;
+        specs?: string;
+        diagrams?: string;
       };
 
       if (msg.command === "openGeneratedFiles") {
@@ -148,6 +165,75 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
         return;
       }
 
+      if (msg.command === "saveArchitectDocs") {
+        const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (workspaceRoot) {
+          const docsDir = path.join(workspaceRoot, ".jame", "docs");
+          fs.mkdirSync(docsDir, { recursive: true });
+          if (msg.specs) {
+            fs.writeFileSync(path.join(docsDir, "specifications.md"), msg.specs, "utf8");
+          }
+          if (msg.diagrams) {
+            fs.writeFileSync(path.join(docsDir, "c4_diagrams.md"), msg.diagrams, "utf8");
+          }
+        }
+        return;
+      }
+
+      if (msg.command === "saveSpecsFile") {
+        // Save specs to .jame/specs-review.md without opening it
+        const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (workspaceRoot && msg.fileContent !== undefined) {
+          const specsPath = path.join(workspaceRoot, ".jame", "specs-review.md");
+          fs.mkdirSync(path.dirname(specsPath), { recursive: true });
+          fs.writeFileSync(specsPath, msg.fileContent, "utf8");
+          this.view?.webview.postMessage({ command: "specsFilePath", filePath: specsPath });
+        }
+        return;
+      }
+
+      if (msg.command === "openSpecsFile") {
+        // Open the already-saved specs file in the editor
+        const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (workspaceRoot) {
+          const specsPath = msg.filePath ?? path.join(workspaceRoot, ".jame", "specs-review.md");
+          if (msg.fileContent !== undefined) {
+            fs.mkdirSync(path.dirname(specsPath), { recursive: true });
+            fs.writeFileSync(specsPath, msg.fileContent, "utf8");
+          }
+          const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(specsPath));
+          await vscode.window.showTextDocument(doc, { preview: false });
+          this.view?.webview.postMessage({ command: "specsFilePath", filePath: specsPath });
+        }
+        return;
+      }
+
+      if (msg.command === "readSpecsFile") {
+        // Read the edited specs file and send content back to webview
+        if (msg.filePath && fs.existsSync(msg.filePath)) {
+          const content = fs.readFileSync(msg.filePath, "utf8");
+          this.view?.webview.postMessage({ command: "specsFileContent", content });
+        }
+        return;
+      }
+
+      if (msg.command === "openExerciseFile") {
+        // Write the stub to disk and open it for editing (no diff — junior edits the stub directly)
+        const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (workspaceRoot && msg.filePath && msg.fileContent !== undefined) {
+          const destPath = path.join(workspaceRoot, msg.filePath);
+          fs.mkdirSync(path.dirname(destPath), { recursive: true });
+          if (!fs.existsSync(destPath)) {
+            // Only write on first open — don't overwrite edits the junior already made
+            fs.writeFileSync(destPath, msg.fileContent, "utf8");
+          }
+          this.generatedFiles.set(msg.filePath, msg.fileContent);
+          const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(destPath));
+          await vscode.window.showTextDocument(doc, { preview: false });
+        }
+        return;
+      }
+
       if (msg.command === "submitClarification") {
         const backendUrlForClarify = this.resolvedBackendUrl ?? vscode.workspace
           .getConfiguration()
@@ -160,6 +246,74 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ answer: msg.answer }),
             });
+          } catch { /* ignore */ }
+        }
+        return;
+      }
+
+      if (msg.command === "submitSpecsReview") {
+        const backendUrlForSpecs = this.resolvedBackendUrl ?? vscode.workspace
+          .getConfiguration()
+          .get<string>("jameWorkflow.backendUrl", "http://localhost:8000");
+        const fetchFnSpecs = (globalThis as { fetch?: (input: string, init?: unknown) => Promise<any> }).fetch;
+        if (fetchFnSpecs && msg.runId && msg.action) {
+          try {
+            await fetchFnSpecs(`${backendUrlForSpecs}/runs/${msg.runId}/approve-specs`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action: msg.action, feedback: msg.feedback ?? "" }),
+            });
+          } catch { /* ignore */ }
+        }
+        return;
+      }
+
+      if (msg.command === "queuePrompt") {
+        const backendUrlForQueue = this.resolvedBackendUrl ?? vscode.workspace
+          .getConfiguration()
+          .get<string>("jameWorkflow.backendUrl", "http://localhost:8000");
+        const fetchFnQueue = (globalThis as { fetch?: (input: string, init?: unknown) => Promise<any> }).fetch;
+        if (fetchFnQueue && msg.runId && msg.prompt) {
+          try {
+            await fetchFnQueue(`${backendUrlForQueue}/runs/${msg.runId}/queue-prompt`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ prompt: msg.prompt }),
+            });
+          } catch { /* ignore */ }
+        }
+        return;
+      }
+
+      if (msg.command === "submitExercise") {
+        const backendUrlForSubmit = this.resolvedBackendUrl ?? vscode.workspace
+          .getConfiguration()
+          .get<string>("jameWorkflow.backendUrl", "http://localhost:8000");
+        const fetchFnSubmit = (globalThis as { fetch?: (input: string, init?: unknown) => Promise<any> }).fetch;
+        if (fetchFnSubmit && msg.runId) {
+          const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+          const files: { path: string; content: string; language: string }[] = [];
+          if (workspaceRoot) {
+            // Read all generated/exercise files that have been saved to workspace
+            for (const [relPath, _content] of this.generatedFiles.entries()) {
+              const absPath = path.join(workspaceRoot, relPath);
+              if (fs.existsSync(absPath)) {
+                const content = fs.readFileSync(absPath, "utf-8");
+                const ext = path.extname(relPath).replace(".", "") || "text";
+                files.push({ path: relPath, content, language: ext });
+              }
+            }
+          }
+          try {
+            const resp = await fetchFnSubmit(`${backendUrlForSubmit}/runs/${msg.runId}/submit`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ files }),
+            });
+            if (resp.ok) {
+              const result = await resp.json() as { passed: boolean; score: number; feedback: string };
+              webviewView.webview.postMessage({ command: "submitResult", passed: result.passed, score: result.score, feedback: result.feedback });
+            }
           } catch { /* ignore */ }
         }
         return;
@@ -503,6 +657,12 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
 
   private async ensureBackendReady(backendUrl: string): Promise<void> {
     if (await this.isBackendHealthy(backendUrl)) {
+      // Fetch instance_id to detect backend restarts
+      const instanceId = await this.fetchInstanceId(backendUrl);
+      const isNewInstance = instanceId && instanceId !== this.knownInstanceId;
+      if (instanceId) {
+        this.knownInstanceId = instanceId;
+      }
       if (!this.resolvedBackendUrl) {
         this.resolvedBackendUrl = backendUrl;
         this.view?.webview.postMessage({ command: "backendUrlResolved", backendUrl });
@@ -510,6 +670,10 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
         this.outputChannel.appendLine(`[JAME] Backend already running at ${backendUrl} (externally managed).`);
         this.outputChannel.appendLine(`[JAME] Logs are in the terminal where you started the backend.`);
         this.outputChannel.appendLine(`[JAME] To see logs here, let the extension manage the backend (stop your manual process).`);
+      }
+      // Backend restarted (new instance) — clear the webview chat
+      if (isNewInstance) {
+        this.view?.webview.postMessage({ command: "clearChat" });
       }
       return;
     }
@@ -610,6 +774,9 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
 
     while (Date.now() - startedAt < timeoutMs) {
       if (await this.isBackendHealthy(backendUrl)) {
+        // Capture instance_id on first healthy response after our own launch
+        const instanceId = await this.fetchInstanceId(backendUrl);
+        if (instanceId) { this.knownInstanceId = instanceId; }
         this.view?.webview.postMessage({ command: "system", message: "Backend ready." });
         return;
       }
@@ -634,6 +801,19 @@ export class JameViewProvider implements vscode.WebviewViewProvider {
     throw new Error(
       `Backend did not become ready in time (${timeoutMs / 1000}s).${snippet ? "\n" + snippet : ""}`
     );
+  }
+
+  private async fetchInstanceId(backendUrl: string): Promise<string | undefined> {
+    const fetchFn = (globalThis as { fetch?: (input: string, init?: unknown) => Promise<any> }).fetch;
+    if (!fetchFn) { return undefined; }
+    try {
+      const resp = await fetchFn(`${backendUrl}/health`);
+      if (!resp.ok) { return undefined; }
+      const body = await resp.json();
+      return body?.instance_id as string | undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   private async isBackendHealthy(backendUrl: string): Promise<boolean> {

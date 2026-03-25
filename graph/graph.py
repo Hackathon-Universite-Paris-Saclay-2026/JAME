@@ -78,7 +78,7 @@ def build_graph() -> StateGraph:
     )
     workflow.add_conditional_edges(
         "devops",
-        lambda s: "exercise_generator" if s.get("learning_mode") else END,
+        lambda s: "exercise_generator" if s.get("mode") == "junior" else END,
         {"exercise_generator": "exercise_generator", END: END},
     )
     workflow.add_edge("exercise_generator", END)

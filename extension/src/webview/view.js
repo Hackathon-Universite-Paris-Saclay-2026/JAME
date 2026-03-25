@@ -30,6 +30,9 @@ const modeChangeOkEl       = document.getElementById('modeChangeOk');
 const modeChangeCancelEl   = document.getElementById('modeChangeCancel');
 let pendingMode = null;
 
+const SEND_ICON_BUILD = '<svg viewBox="0 0 16 16"><path d="M1 1l14 7L1 15V9l10-2L1 7V1z"/></svg>';
+const SEND_ICON_QUEUE = '<svg viewBox="0 0 16 16"><path d="M8 2l4 4H9v8H7V6H4l4-4z"/></svg>';
+
 modeChangeOkEl.addEventListener('click', () => {
   modeChangeConfirmEl.style.display = 'none';
   if (pendingMode) {
@@ -276,8 +279,10 @@ let ws               = null;
 let isRunning        = false;
 let generatedFiles   = [];
 let projectDir       = null;
-let currentIteration = 0;
-let lastAgent        = null;
+let currentIteration    = 0;
+let lastAgent           = null;
+let _architectStreamBuf = '';   // accumulated architect design tokens
+let _architectStreamRow = null; // live DOM row for streaming architect output
 let tcAutoApprove    = false;
 let tcPending        = null;
 // files panel state
@@ -371,6 +376,9 @@ function resetFilesPanel() {
 }
 
 function addFileToPanel(relPath, content) {
+  // Skip files the user already decided on (keep/undo) — prevents late-arriving
+  // file_generated events from re-opening the panel after Keep All / Undo All.
+  if (fpDecided.has(relPath)) return;
   const lines = content ? content.split('\n').length : 0;
   fpFiles[relPath] = lines;
 
@@ -418,6 +426,44 @@ function addFileToPanel(relPath, content) {
   filesPanel.classList.add('visible');
 }
 
+// Junior mode variant: shows a locked placeholder row — no content visible,
+// no open-diff action, no keep/undo (the file is the exercise stub to implement).
+// exerciseFileContents: relPath → stub content (for opening on click)
+const exerciseFileContents = {};
+
+function addFileToPanelExercise(relPath, content) {
+  if (fpDecided.has(relPath)) return;
+  fpFiles[relPath] = 0;
+  exerciseFileContents[relPath] = content || '';
+
+  const existing = filesPanelBody.querySelector('[data-path="' + CSS.escape(relPath) + '"]');
+  if (existing) existing.remove();
+
+  const ext = (relPath.split('.').pop() || 'file').toLowerCase();
+  const name = relPath.split('/').pop() || relPath;
+
+  const row = document.createElement('div');
+  row.className = 'fp-row fp-row-exercise';
+  row.dataset.path = relPath;
+  row.title = 'Click to open — implement the TODO stubs in this file';
+  row.innerHTML =
+    '<span class="fp-ext">' + escHtml(ext) + '</span>' +
+    '<span class="fp-name" title="' + escHtml(relPath) + '">' + escHtml(name) + '</span>' +
+    '<span class="fp-stub-badge">stub</span>';
+
+  row.addEventListener('click', function() {
+    vscode.postMessage({
+      command: 'openExerciseFile',
+      filePath: relPath,
+      fileContent: exerciseFileContents[relPath] || '',
+    });
+  });
+
+  filesPanelBody.appendChild(row);
+  updateFilesPanelSummary();
+  filesPanel.classList.add('visible');
+}
+
 function setFilesPanelVerdict(qaPassed) {
   let v = filesPanel.querySelector('.fp-verdict');
   if (!v) {
@@ -447,6 +493,7 @@ let historyDraft  = '';
 inputEl.addEventListener('input', () => {
   inputEl.style.height = 'auto';
   inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + 'px';
+  updateComposerActions();
   if (historyIndex !== -1) {
     historyIndex = -1;
     historyDraft = '';
@@ -540,12 +587,37 @@ stopBtn.addEventListener('click', stop);
 showLogsBtn.addEventListener('click', () => vscode.postMessage({ command: 'showLogs' }));
 newChatBtn.addEventListener('click', newChat);
 
+function updateComposerActions() {
+  if (!isRunning) {
+    sendBtn.style.display = 'flex';
+    stopBtn.style.display = 'none';
+    sendBtn.innerHTML = SEND_ICON_BUILD;
+    sendBtn.title = 'Build (Enter)';
+    return;
+  }
+
+  const hasText = Boolean(inputEl.value.trim());
+  if (hasText) {
+    sendBtn.style.display = 'flex';
+    stopBtn.style.display = 'none';
+    sendBtn.innerHTML = SEND_ICON_QUEUE;
+    sendBtn.title = 'Queue instruction (Enter)';
+    return;
+  }
+
+  sendBtn.style.display = 'none';
+  stopBtn.style.display = 'flex';
+  stopBtn.title = 'Cancel run';
+}
+
 // Running state
 function setRunning(running) {
   isRunning = running;
-  inputEl.disabled = running;
-  sendBtn.style.display = running ? 'none' : 'flex';
-  stopBtn.style.display = running ? 'flex' : 'none';
+  inputEl.disabled = false;
+  updateComposerActions();
+  inputEl.placeholder = running
+    ? 'Add instruction for the next developer iteration...'
+    : 'Describe what to build...';
   if (running) setProgressIndeterminate();
   else clearProgress();
   saveState();
@@ -580,6 +652,7 @@ function removeEmpty() {
 // User message bubble
 function addUserMessage(text) {
   removeEmpty();
+  breakAgentGroup();
   const div = document.createElement('div');
   div.className = 'user-msg';
   div.innerHTML = '<div class="user-bubble">' + escHtml(text) + '</div>';
@@ -590,6 +663,7 @@ function addUserMessage(text) {
 // System message
 const SYS_ICONS = { ok: '\u2713', warn: '\u26a0', err: '\u2715', info: '\u2139' };
 function addSysMsg(text, level) {
+  breakAgentGroup();
   const div = document.createElement('div');
   div.className = 'sys-msg ' + (level || 'info');
   div.innerHTML =
@@ -601,6 +675,7 @@ function addSysMsg(text, level) {
 
 // Agent log row
 let _lastRowAc = null;
+let _currentAgentGroup = null; // the group wrapper div for the current agent streak
 const AGENT_SHORT = {
   'architect':       'ARCH',
   'developer':       'DEV',
@@ -611,6 +686,13 @@ const AGENT_SHORT = {
   'exercise':        'EX',
   'system':          'SYS',
 };
+
+/** Call whenever a non-agent element (clarify card, sys msg, etc.) is added to the feed. */
+function breakAgentGroup() {
+  _lastRowAc = null;
+  _currentAgentGroup = null;
+  _architectStreamRow = null;
+}
 
 function addTlRow(agentDisplay, msg, thinking, phase) {
   removeEmpty();
@@ -625,7 +707,7 @@ function addTlRow(agentDisplay, msg, thinking, phase) {
     'system':    'ac-system',
   }[agentKey] || 'ac-system';
 
-  const isSame = _lastRowAc === acClass;
+  const isSame = _lastRowAc === acClass && _currentAgentGroup !== null;
   _lastRowAc = acClass;
 
   // "BUILD AND TEST" -> "BUILD_AND_TEST" -> phase-build_and_test
@@ -635,22 +717,29 @@ function addTlRow(agentDisplay, msg, thinking, phase) {
 
   const shortLabel = AGENT_SHORT[agentKey] || agentDisplay.slice(0, 4).toUpperCase();
 
+  // Create or reuse the agent group wrapper (holds the continuous left border)
+  if (!isSame) {
+    _currentAgentGroup = document.createElement('div');
+    _currentAgentGroup.className = 'agent-group ' + acClass + ' fade-in';
+    feed.appendChild(_currentAgentGroup);
+  }
+
   const row = document.createElement('div');
-  row.className = 'agent-row ' + acClass + (isSame ? ' same-agent' : '') + ' fade-in';
+  row.className = 'agent-row' + (isSame ? ' same-agent' : '');
   row.innerHTML =
     '<span class="ar-tag" title="' + escHtml(agentDisplay) + '">' + escHtml(shortLabel) + '</span>' +
     (normalizedPhase ? '<span class="ar-phase phase-' + normalizedPhase + '">' + escHtml(phase) + '</span>' : '') +
     '<span class="ar-msg">' + renderMd(msg) + '</span>' +
     (thinking ? '<button class="ar-think-btn">\u25b6 thinking</button>' : '');
 
-  feed.appendChild(row);
+  _currentAgentGroup.appendChild(row);
 
   if (thinking) {
     const btn = row.querySelector('.ar-think-btn');
     const thinkDiv = document.createElement('div');
     thinkDiv.className = 'ar-think-content';
     thinkDiv.textContent = thinking;
-    feed.appendChild(thinkDiv);
+    _currentAgentGroup.appendChild(thinkDiv);
 
     btn.addEventListener('click', () => {
       const shown = thinkDiv.classList.contains('shown');
@@ -676,12 +765,14 @@ function addFileDiffRow(filePath, linesAdded, linesRemoved) {
   row.querySelector('.file-diff-name').addEventListener('click', () => {
     vscode.postMessage({ command: 'openProposedChange', filePath: filePath, fileContent: '' });
   });
-  feed.appendChild(row);
+  // Append inside the current agent group if one exists, else directly to feed
+  (_currentAgentGroup || feed).appendChild(row);
   scrollFeed();
 }
 
 // Iteration separator
 function addIterSep(label) {
+  breakAgentGroup();
   const div = document.createElement('div');
   div.className = 'iter-sep fade-in';
   div.innerHTML =
@@ -730,6 +821,7 @@ function showInlineDiff(filePath) {
 
 // QA verdict
 function showVerdict(passed) {
+  breakAgentGroup();
   const div = document.createElement('div');
   div.className = 'verdict fade-in ' + (passed ? 'pass' : 'fail');
   div.textContent = passed
@@ -773,6 +865,7 @@ tcModalOverlay.querySelector('.tc-modal-enable').addEventListener('click', () =>
 });
 
 function showToolCallCard(data) {
+  breakAgentGroup();
   const payload      = (data && data.payload) || {};
   const toolName     = payload.tool_name || 'tool';
   const cmdBin       = payload.command   || toolName;
@@ -888,6 +981,7 @@ function _tcSettle(card, actionsEl, toolCallId, action, isAuto) {
 }
 
 function showClarificationCard(question, options) {
+  breakAgentGroup();
   const opts = options && options.length > 0 ? options : [];
   let page = 0;
   let selectedOpt = null;
@@ -1000,11 +1094,247 @@ function showClarificationCard(question, options) {
   scrollFeed();
 }
 
+// C4 Diagrams card — shown after architect completes
+function showDiagramsCard(specs, diagrams, scope) {
+  breakAgentGroup();
+  const card = document.createElement('div');
+  card.className = 'diagrams-card';
+
+  const sections = [];
+  if (specs) sections.push({ label: 'Specifications', content: specs, mono: false });
+  if (diagrams) sections.push({ label: 'C4 Diagrams', content: diagrams, mono: true });
+
+  let html = '<div class="diagrams-card-header">';
+  html += '<span class="diagrams-icon">&#128196;</span>';
+  html += '<strong>Architecture design complete</strong>';
+  if (scope) html += ' <span class="diagrams-scope">(' + escHtml(scope) + ' scope)</span>';
+  html += '</div>';
+
+  sections.forEach(({ label, content, mono }) => {
+    const id = 'diag-section-' + Math.random().toString(36).slice(2);
+    html += '<div class="diagrams-section">';
+    html += '<button class="diagrams-toggle" data-target="' + id + '">&#9654; ' + escHtml(label) + '</button>';
+    html += '<div class="diagrams-body' + (mono ? ' diagrams-code' : '') + '" id="' + id + '">';
+    if (mono) {
+      html += '<pre>' + escHtml(content) + '</pre>';
+    } else {
+      html += '<div class="diagrams-prose">' + renderMd(content) + '</div>';
+    }
+    html += '</div></div>';
+  });
+
+  card.innerHTML = html;
+
+  card.querySelectorAll('.diagrams-toggle').forEach(btn => {
+    const targetId = btn.getAttribute('data-target');
+    btn.addEventListener('click', () => {
+      const body = document.getElementById(targetId);
+      const open = body.classList.toggle('shown');
+      btn.textContent = (open ? '▼ ' : '▶ ') + btn.textContent.slice(2);
+    });
+  });
+
+  feed.appendChild(card);
+  scrollFeed();
+}
+
+// Specs review card — approve or request revision via edited MD file
+let _specsFilePath = null;         // set when view.ts confirms the file was written
+let _pendingReviseFromFile = null; // { originalSpecs, settle } — set while waiting for readSpecsFile response
+
+function showSpecsReviewCard(question, specs) {
+  breakAgentGroup();
+  const card = document.createElement('div');
+  card.className = 'specs-review-card fade-in';
+
+  // Header
+  const header = document.createElement('div');
+  header.className = 'specs-review-header';
+  header.innerHTML =
+    '<svg class="specs-review-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">' +
+      '<rect x="2" y="1" width="10" height="14" rx="1.5"/>' +
+      '<line x1="4.5" y1="5" x2="9.5" y2="5"/>' +
+      '<line x1="4.5" y1="8" x2="9.5" y2="8"/>' +
+      '<line x1="4.5" y1="11" x2="7.5" y2="11"/>' +
+    '</svg>' +
+    '<span class="specs-review-title">Specifications Review</span>';
+  card.appendChild(header);
+
+  // Save the file immediately to workspace so user can see it right away
+  vscode.postMessage({ command: 'saveSpecsFile', fileContent: specs });
+
+  // Instruction
+  const hint = document.createElement('div');
+  hint.className = 'specs-review-hint';
+  hint.innerHTML =
+    'The specifications have been saved to <code>.jame/specs-review.md</code> in your workspace. ' +
+    'Open the file, edit if needed, then confirm below.';
+  card.appendChild(hint);
+
+  // Two-button row: Open | Confirm
+  const actions = document.createElement('div');
+  actions.className = 'specs-review-actions';
+
+  const openBtn = document.createElement('button');
+  openBtn.className = 'btn btn-secondary';
+  openBtn.innerHTML =
+    '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0">' +
+      '<path d="M9 1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V5z"/>' +
+      '<polyline points="9 1 9 5 13 5"/>' +
+    '</svg>' +
+    'Open file';
+  openBtn.addEventListener('click', function() {
+    // Pass the already-known path if available, else let view.ts derive it
+    vscode.postMessage({ command: 'openSpecsFile', filePath: _specsFilePath, fileContent: specs });
+  });
+
+  const confirmBtn = document.createElement('button');
+  confirmBtn.className = 'btn btn-success';
+  confirmBtn.innerHTML =
+    '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0">' +
+      '<polyline points="2 8 6 12 14 4"/>' +
+    '</svg>' +
+    'Confirm';
+
+  actions.appendChild(openBtn);
+  actions.appendChild(confirmBtn);
+  card.appendChild(actions);
+
+  function settle(action, feedback) {
+    openBtn.disabled = true;
+    confirmBtn.disabled = true;
+    const summary = document.createElement('div');
+    summary.className = 'clarify-summary';
+    summary.innerHTML =
+      '<div class="cs-q">Specifications review</div>' +
+      '<div class="cs-a">' + escHtml(action === 'approve'
+        ? 'Confirmed — proceeding to code generation.'
+        : 'Revision requested.') + '</div>';
+    card.replaceWith(summary);
+    vscode.postMessage({
+      command: 'submitSpecsReview',
+      runId: currentRunId,
+      action,
+      feedback: action === 'revise' ? (feedback || '') : '',
+    });
+    scrollFeed();
+  }
+
+  confirmBtn.addEventListener('click', function() {
+    // If user opened and possibly edited the file, read it back and check for changes
+    if (_specsFilePath) {
+      confirmBtn.disabled = true;
+      confirmBtn.textContent = 'Reading…';
+      vscode.postMessage({ command: 'readSpecsFile', filePath: _specsFilePath });
+      _pendingReviseFromFile = { originalSpecs: specs, settle };
+    } else {
+      // File was never opened — straight approve
+      settle('approve', '');
+    }
+  });
+
+  feed.appendChild(card);
+  scrollFeed();
+}
+
+// Iteration review card — senior mode: proceed or inject instructions
+function showIterationReviewCard(question) {
+  breakAgentGroup();
+  const card = document.createElement('div');
+  card.className = 'iter-review-card fade-in';
+
+  const header = document.createElement('div');
+  header.className = 'iter-review-header';
+  header.innerHTML =
+    '<span class="iter-review-icon">&#128269;</span>' +
+    '<span class="iter-review-title">QA Iteration Review</span>';
+  card.appendChild(header);
+
+  // Strip the sentinel prefix for display
+  const displayText = question.replace(/^QA iteration review:\s*/i, '');
+  const qEl = document.createElement('div');
+  qEl.className = 'iter-review-body';
+  qEl.innerHTML = renderMd(displayText);
+  card.appendChild(qEl);
+
+  const instrRow = document.createElement('div');
+  instrRow.className = 'iter-review-instr-row';
+  instrRow.style.display = 'none';
+  const instrArea = document.createElement('textarea');
+  instrArea.className = 'clarify-text';
+  instrArea.placeholder = 'Type instructions for the developer (optional)…';
+  instrArea.rows = 2;
+  instrRow.appendChild(instrArea);
+  card.appendChild(instrRow);
+
+  const actions = document.createElement('div');
+  actions.className = 'iter-review-actions';
+
+  const proceedBtn = document.createElement('button');
+  proceedBtn.className = 'btn btn-success';
+  proceedBtn.textContent = '▶ Proceed automatically';
+
+  const instrBtn = document.createElement('button');
+  instrBtn.className = 'btn btn-secondary';
+  instrBtn.textContent = '✎ Add instructions';
+
+  const sendInstrBtn = document.createElement('button');
+  sendInstrBtn.className = 'btn btn-primary';
+  sendInstrBtn.textContent = 'Send';
+  sendInstrBtn.style.display = 'none';
+
+  actions.appendChild(proceedBtn);
+  actions.appendChild(instrBtn);
+  actions.appendChild(sendInstrBtn);
+  card.appendChild(actions);
+
+  function settle(answer) {
+    proceedBtn.disabled = true;
+    instrBtn.disabled = true;
+    sendInstrBtn.disabled = true;
+    instrArea.disabled = true;
+    const summary = document.createElement('div');
+    summary.className = 'clarify-summary';
+    summary.innerHTML =
+      '<div class="cs-q">QA Iteration Review</div>' +
+      '<div class="cs-a">' + escHtml(answer === 'proceed' ? 'Proceeding with automatic fixes.' : 'Instructions queued: ' + answer) + '</div>';
+    card.replaceWith(summary);
+    vscode.postMessage({ command: 'submitClarification', runId: currentRunId, answer });
+    scrollFeed();
+  }
+
+  proceedBtn.addEventListener('click', () => settle('proceed'));
+
+  instrBtn.addEventListener('click', () => {
+    instrRow.style.display = '';
+    instrBtn.style.display = 'none';
+    sendInstrBtn.style.display = '';
+    instrArea.focus();
+  });
+
+  sendInstrBtn.addEventListener('click', () => {
+    const txt = instrArea.value.trim();
+    settle(txt || 'proceed');
+  });
+
+  instrArea.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      const txt = instrArea.value.trim();
+      settle(txt || 'proceed');
+    }
+  });
+
+  feed.appendChild(card);
+  scrollFeed();
+}
+
 // Send / stop
 function send() {
   const text = inputEl.value.trim();
   const slashCmd = activeSlashCmd;
-  if ((!text && !slashCmd) || isRunning) return;
+  // Empty input while running: do nothing (stop is on the stop button, not send)
+  if (!text && !slashCmd) return;
 
   const mode = currentMode;
   const displayText = slashCmd ? slashCmd + (text ? ' ' + text : '') : text;
@@ -1014,6 +1344,21 @@ function send() {
   }
   historyIndex = -1;
   historyDraft = '';
+
+  if (isRunning) {
+    if (!currentRunId) {
+      addSysMsg('No active run to queue into.', 'warn');
+      return;
+    }
+    addUserMessage(displayText);
+    inputEl.value = '';
+    inputEl.style.height = 'auto';
+    updateComposerActions();
+    clearSlashCommand();
+    closeSuggestions();
+    vscode.postMessage({ command: 'queuePrompt', runId: currentRunId, prompt: displayText });
+    return;
+  }
 
   generatedFiles = [];
   projectDir = null;
@@ -1037,6 +1382,203 @@ function stop() {
   if (!currentRunId) return;
   vscode.postMessage({ command: 'cancelRun', runId: currentRunId });
   addSysMsg('Cancellation requested...', 'warn');
+}
+
+// Junior mode: show a card with learning objectives + Submit button.
+// Junior works on the exercise files via the files panel, then hits Submit.
+const _EXERCISE_ICON_SVG =
+  '<svg class="exercise-icon-svg" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">' +
+  '<rect x="1" y="2" width="14" height="12" rx="2" stroke="currentColor" stroke-width="1.4"/>' +
+  '<path d="M4 6h5M4 9h8M4 12h6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>' +
+  '<path d="M11 3V1m0 0l-1.5 1.5M11 1l1.5 1.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>' +
+  '</svg>';
+
+let _exerciseBarSubmitBtn = null;
+
+function showSubmitExerciseCard(objectives) {
+  const bar = document.getElementById('exerciseBar');
+  if (!bar) return;
+
+  bar.innerHTML = '';
+  bar.style.display = '';
+
+  // Left: icon + label + objectives pill
+  const left = document.createElement('div');
+  left.className = 'ex-bar-left';
+
+  const titleRow = document.createElement('div');
+  titleRow.className = 'ex-bar-title-row';
+  titleRow.innerHTML = _EXERCISE_ICON_SVG + '<span class="ex-bar-title">Exercise ready</span>';
+  left.appendChild(titleRow);
+
+  if (objectives.length > 0) {
+    const objWrap = document.createElement('div');
+    objWrap.className = 'ex-bar-objectives';
+    objectives.forEach(function(obj) {
+      const chip = document.createElement('span');
+      chip.className = 'ex-bar-obj-chip';
+      chip.textContent = obj;
+      objWrap.appendChild(chip);
+    });
+    left.appendChild(objWrap);
+  }
+
+  bar.appendChild(left);
+
+  // Right: submit button
+  const right = document.createElement('div');
+  right.className = 'ex-bar-right';
+
+  const submitBtn = document.createElement('button');
+  submitBtn.className = 'btn btn-primary ex-bar-submit-btn';
+  submitBtn.textContent = 'Submit';
+  _exerciseBarSubmitBtn = submitBtn;
+
+  submitBtn.addEventListener('click', function() {
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Submitting…';
+    vscode.postMessage({ command: 'submitExercise', runId: currentRunId });
+  });
+
+  right.appendChild(submitBtn);
+  bar.appendChild(right);
+}
+
+function hideExerciseBar() {
+  const bar = document.getElementById('exerciseBar');
+  if (bar) bar.style.display = 'none';
+  _exerciseBarSubmitBtn = null;
+}
+
+// Show validation result in the feed (readable, structured).
+function showSubmitResult(passed, score, feedback) {
+  // Re-enable the submit button so user can retry
+  if (_exerciseBarSubmitBtn) {
+    _exerciseBarSubmitBtn.disabled = false;
+    _exerciseBarSubmitBtn.textContent = 'Submit again';
+  }
+
+  const card = document.createElement('div');
+  card.className = 'exercise-result-card fade-in ' + (passed ? 'result-pass' : 'result-fail');
+
+  // Score row
+  const scoreRow = document.createElement('div');
+  scoreRow.className = 'er-score-row';
+  const scoreIcon = document.createElement('span');
+  scoreIcon.className = 'er-score-icon';
+  scoreIcon.innerHTML = passed
+    ? '<svg viewBox="0 0 16 16"><path d="M3 8l3.5 3.5L13 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>'
+    : '<svg viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/></svg>';
+  const scoreLabel = document.createElement('span');
+  scoreLabel.className = 'er-score-label';
+  scoreLabel.innerHTML = passed
+    ? '<strong>Passed</strong>'
+    : '<strong>Not yet — keep going</strong>';
+  const scoreBadge = document.createElement('span');
+  scoreBadge.className = 'er-score-badge';
+  scoreBadge.textContent = score + ' / 100';
+  scoreRow.appendChild(scoreIcon);
+  scoreRow.appendChild(scoreLabel);
+  scoreRow.appendChild(scoreBadge);
+  card.appendChild(scoreRow);
+
+  if (feedback) {
+    const fb = document.createElement('div');
+    fb.className = 'er-feedback';
+    // Split sections by double-newline for better readability
+    feedback.trim().split(/\n{2,}/).forEach(function(block, i) {
+      if (i > 0) {
+        const sep = document.createElement('div');
+        sep.className = 'er-sep';
+        fb.appendChild(sep);
+      }
+      const p = document.createElement('p');
+      p.className = 'er-block';
+      p.textContent = block.trim();
+      fb.appendChild(p);
+    });
+    card.appendChild(fb);
+  }
+
+  if (!passed) {
+    const continueBtn = document.createElement('button');
+    continueBtn.className = 'btn btn-secondary er-continue-btn';
+    continueBtn.textContent = 'Continue working';
+    continueBtn.addEventListener('click', function() {
+      continueBtn.remove();
+    });
+    card.appendChild(continueBtn);
+  } else {
+    hideExerciseBar();
+  }
+
+  feed.appendChild(card);
+  scrollFeed();
+}
+
+// Queue-prompt: inject an instruction into the active run's developer queue.
+function showQueuePromptForm() {
+  if (!currentRunId || !isRunning) return;
+
+  const card = document.createElement('div');
+  card.className = 'queue-prompt-card fade-in';
+
+  const header = document.createElement('div');
+  header.className = 'queue-prompt-header';
+  header.innerHTML =
+    '<span class="queue-prompt-icon">&#128172;</span>' +
+    '<span class="queue-prompt-title">Inject instruction into next developer iteration</span>';
+  card.appendChild(header);
+
+  const textRow = document.createElement('div');
+  textRow.className = 'queue-prompt-text-row';
+  const textArea = document.createElement('textarea');
+  textArea.className = 'clarify-text';
+  textArea.placeholder = 'Type instructions for the developer…';
+  textArea.rows = 2;
+  textRow.appendChild(textArea);
+  card.appendChild(textRow);
+
+  const actions = document.createElement('div');
+  actions.className = 'queue-prompt-actions';
+
+  const queueSendBtn = document.createElement('button');
+  queueSendBtn.className = 'btn btn-primary';
+  queueSendBtn.textContent = 'Queue';
+
+  const queueCancelBtn = document.createElement('button');
+  queueCancelBtn.className = 'btn btn-secondary';
+  queueCancelBtn.textContent = 'Cancel';
+
+  actions.appendChild(queueSendBtn);
+  actions.appendChild(queueCancelBtn);
+  card.appendChild(actions);
+
+  function dismiss() { card.remove(); }
+
+  queueSendBtn.addEventListener('click', function() {
+    const prompt = textArea.value.trim();
+    if (!prompt) { textArea.focus(); return; }
+    const summary = document.createElement('div');
+    summary.className = 'clarify-summary';
+    summary.innerHTML =
+      '<div class="cs-q">Queued instruction</div>' +
+      '<div class="cs-a">' + escHtml(prompt) + '</div>';
+    card.replaceWith(summary);
+    vscode.postMessage({ command: 'queuePrompt', runId: currentRunId, prompt });
+    scrollFeed();
+  });
+
+  queueCancelBtn.addEventListener('click', dismiss);
+
+  textArea.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); queueSendBtn.click(); }
+    if (e.key === 'Escape') dismiss();
+  });
+
+  feed.appendChild(card);
+  scrollFeed();
+  textArea.focus();
 }
 
 function newChat() {
@@ -1073,6 +1615,7 @@ function doNewChat() {
   inputEl.value = '';
   inputEl.style.height = 'auto';
 
+  hideExerciseBar();
   feed.innerHTML = '';
   const emptyDiv = document.createElement('div');
   emptyDiv.className = 'empty';
@@ -1104,6 +1647,14 @@ window.addEventListener('message', async (event) => {
 
   if (msg.command === 'backendUrlResolved') {
     window._resolvedBackendUrl = msg.backendUrl;
+    return;
+  }
+
+  if (msg.command === 'clearChat') {
+    // Backend restarted (new instance_id) — clear stale session state
+    if (!isRunning) {
+      doNewChat();
+    }
     return;
   }
 
@@ -1154,6 +1705,34 @@ window.addEventListener('message', async (event) => {
 
   if (msg.command === 'allDiscarded') {
     addSysMsg('All proposed changes discarded.', 'warn');
+    return;
+  }
+
+  if (msg.command === 'submitResult') {
+    showSubmitResult(!!msg.passed, msg.score ?? 0, msg.feedback ?? '');
+    return;
+  }
+
+  if (msg.command === 'specsFilePath') {
+    // view.ts confirmed the specs MD file was written — store path so revise btn can read it
+    _specsFilePath = msg.filePath;
+    return;
+  }
+
+  if (msg.command === 'specsFileContent') {
+    // view.ts read back the edited specs MD — approve if unchanged, revise if edited
+    if (_pendingReviseFromFile) {
+      const { originalSpecs, settle } = _pendingReviseFromFile;
+      _pendingReviseFromFile = null;
+      const content = msg.content || '';
+      if (content.trim() === (originalSpecs || '').trim()) {
+        // No changes — treat as approval
+        settle('approve', '');
+      } else {
+        // User edited the file — send diff as revision feedback
+        settle('revise', content);
+      }
+    }
     return;
   }
 });
@@ -1223,6 +1802,33 @@ function handleServerEvent(data) {
       return;
     }
 
+    // Architect design streaming: update a single live row with char count
+    if (rawAgent === 'architect' && (phase === 'act' || payload.phase === 'act')) {
+      // Extract char count from progress message "Designing… N chars"
+      const match = msg.match(/(\d+)\s*chars/);
+      if (match) _architectStreamBuf = match[1];
+      if (!_architectStreamRow) {
+        if (!_currentAgentGroup || _lastRowAc !== 'ac-architect') {
+          _currentAgentGroup = document.createElement('div');
+          _currentAgentGroup.className = 'agent-group ac-architect fade-in';
+          feed.appendChild(_currentAgentGroup);
+          _lastRowAc = 'ac-architect';
+        }
+        const row = document.createElement('div');
+        row.className = 'agent-row same-agent';
+        row.innerHTML =
+          '<span class="ar-tag">ARCH</span>' +
+          '<span class="ar-phase phase-act">act</span>' +
+          '<span class="ar-msg ar-stream-msg">Designing architecture\u2026 <span class="ar-stream-count">0</span> chars</span>';
+        _currentAgentGroup.appendChild(row);
+        _architectStreamRow = row;
+      }
+      const counter = _architectStreamRow.querySelector('.ar-stream-count');
+      if (counter && match) counter.textContent = match[1];
+      scrollFeed();
+      return;
+    }
+
     if (!msg) return;
 
     if (
@@ -1251,14 +1857,41 @@ function handleServerEvent(data) {
   if (event === 'file_generated') {
     const p = data.payload;
     if (p && p.path) {
-      vscode.postMessage({ command: 'openProposedChange', filePath: p.path, fileContent: p.content || '' });
-      addFileToPanel(p.path, p.content || '');
-      generatedFiles.push(p.path);
+      if (currentMode === 'junior') {
+        // Junior mode: only show files produced by the exercise packager (after stripping).
+        // Developer node files are hidden — the junior sees only the stub version.
+        if (data.agent === 'exercise_generator') {
+          generatedFiles.push(p.path);
+          addFileToPanelExercise(p.path, p.content || '');
+        }
+        // else: silently ignore developer-node file events in junior mode
+      } else {
+        generatedFiles.push(p.path);
+        vscode.postMessage({ command: 'openProposedChange', filePath: p.path, fileContent: p.content || '' });
+        addFileToPanel(p.path, p.content || '');
+      }
     }
     return;
   }
 
   if (event === 'files_ready') {
+    const p = data.payload || {};
+    if (Array.isArray(p.generated_files) && p.generated_files.length > 0) {
+      filesPanel.classList.add('visible');
+    }
+    return;
+  }
+
+  if (event === 'exercise_ready') {
+    const p = data.payload || {};
+    const objectives = Array.isArray(p.learning_objectives) ? p.learning_objectives : [];
+    addSysMsg('Learning exercise ready' + (objectives.length ? ' (' + objectives.length + ' objective(s)).' : '.'), 'ok');
+    // Open the files panel so the junior can see and work on the exercise stubs
+    filesPanel.classList.add('visible');
+    // Unlock the UI — junior run is in AWAITING_SUBMISSION, not COMPLETED
+    setRunning(false);
+    // Show a submit card so the junior can submit their implementation
+    showSubmitExerciseCard(objectives);
     return;
   }
 
@@ -1267,6 +1900,42 @@ function handleServerEvent(data) {
     const question = p.question || data.message || 'Please clarify:';
     const options = p.options || [];
     showClarificationCard(question, options);
+    return;
+  }
+
+  if (event === 'architect_done') {
+    const p = data.payload || {};
+    // Remove the live streaming row — diagrams card takes its place
+    if (_architectStreamRow) {
+      _architectStreamRow.remove();
+      _architectStreamRow = null;
+    }
+    _architectStreamBuf = '';
+    showDiagramsCard(p.specs || '', p.diagrams || '', p.scope || '');
+    // Save specs + diagrams as docs in the workspace
+    if (p.specs || p.diagrams) {
+      vscode.postMessage({ command: 'saveArchitectDocs', specs: p.specs || '', diagrams: p.diagrams || '' });
+    }
+    return;
+  }
+
+  if (event === 'specs_review_request') {
+    const p = data.payload || {};
+    const question = p.question || data.message || 'Review specifications:';
+    const specs = p.specs || '';
+    showSpecsReviewCard(question, specs);
+    return;
+  }
+
+  if (event === 'iteration_review_request') {
+    const p = data.payload || {};
+    const question = p.question || data.message || 'QA iteration review:';
+    showIterationReviewCard(question);
+    return;
+  }
+
+  if (event === 'prompt_queued') {
+    addSysMsg('Instruction queued for next developer iteration.', 'ok');
     return;
   }
 
@@ -1293,6 +1962,14 @@ function handleServerEvent(data) {
   if (event === 'run_cancelled') {
     addSysMsg('Build cancelled.', 'warn');
     setRunning(false);
+    if (ws) ws.close();
+    return;
+  }
+
+  if (event === 'awaiting_submission') {
+    addSysMsg(data.message || 'Pipeline complete - waiting for your implementation.', 'ok');
+    setRunning(false);
+    clearProgress();
     if (ws) ws.close();
     return;
   }

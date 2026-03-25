@@ -18,6 +18,7 @@ class RunStatus(str, Enum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     AWAITING_SUBMISSION = "awaiting_submission"
+    AWAITING_SPECS_REVIEW = "awaiting_specs_review"
 
 
 class RunCreateRequest(BaseModel):
@@ -33,10 +34,6 @@ class RunCreateRequest(BaseModel):
         le=10,
         description="Maximum QA→Developer retry loops before forcing completion.",
     )
-    learning_mode: bool = Field(
-        default=False,
-        description="Enable Learning Mode: generates exercise files with TODOs for junior developers.",
-    )
     mode: str = Field(
         default="senior",
         pattern="^(junior|senior|expert)$",
@@ -50,6 +47,28 @@ class ClarifyRequest(BaseModel):
     answer: str = Field(
         min_length=1,
         description="User's answer to the architect's clarification question.",
+    )
+
+
+class SpecsReviewRequest(BaseModel):
+    """Request body for POST /runs/{run_id}/approve-specs."""
+
+    action: str = Field(
+        pattern="^(approve|revise)$",
+        description="'approve' to proceed to code generation, 'revise' to provide feedback.",
+    )
+    feedback: str = Field(
+        default="",
+        description="Revision feedback when action='revise'. Ignored when action='approve'.",
+    )
+
+
+class QueuePromptRequest(BaseModel):
+    """Request body for POST /runs/{run_id}/queue-prompt (senior mode instruction injection)."""
+
+    prompt: str = Field(
+        min_length=1,
+        description="Instruction to inject into the senior developer's next iteration.",
     )
 
 

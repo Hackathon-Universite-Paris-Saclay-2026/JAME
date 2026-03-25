@@ -103,6 +103,29 @@ class OrchestratorService:
 
         return result
 
+    async def queue_senior_prompt(self, run_id: str, prompt: str) -> bool:
+        """Append an instruction to the senior prompt queue for the given run.
+
+        Returns True if the run exists, False otherwise. The queued instruction
+        will be consumed by the developer node on its next iteration.
+        """
+        record = self.store.get_run(run_id)
+        if record is None:
+            return False
+        state = record.result.get("state", {})
+        queue: list[str] = state.get("senior_prompt_queue", [])
+        queue.append(prompt)
+        state["senior_prompt_queue"] = queue
+        record.result["state"] = state
+        await self._emit(
+            run_id,
+            "prompt_queued",
+            "Instruction queued for next developer iteration.",
+            agent="developer",
+            payload={"prompt": prompt, "queue_length": len(queue)},
+        )
+        return True
+
     async def get_next_hint(self, run_id: str) -> str | None:
         """Unlock and return the next progressive hint.
 
@@ -136,6 +159,11 @@ class OrchestratorService:
         )
         return hint
 
+    # Sentinel prefix that architect_node uses to mark specs review questions.
+    _SPECS_REVIEW_PREFIX = "Please review the generated specifications."
+    # Sentinel prefix that qa_node uses to mark senior iteration review questions.
+    _ITERATION_REVIEW_PREFIX = "QA iteration review:"
+
     async def _request_clarification(
         self, run_id: str, question: str, options: list[str]
     ) -> str:
@@ -153,6 +181,74 @@ class OrchestratorService:
             return await asyncio.wait_for(future, timeout=300.0)
         except TimeoutError:
             return ""
+
+    async def _request_iteration_review(
+        self, run_id: str, question: str, options: list[str]
+    ) -> str:
+        """Emit an iteration_review_request event and await the human's proceed/instruction answer.
+
+        Uses the same clarification future so the existing /clarify endpoint resolves it.
+        """
+        future = self.store.request_clarification(run_id)
+        await self._emit(
+            run_id,
+            "iteration_review_request",
+            question,
+            agent="qa",
+            phase="iteration_review",
+            payload={"question": question, "options": options},
+        )
+        try:
+            return await asyncio.wait_for(future, timeout=300.0)
+        except TimeoutError:
+            return "proceed"
+
+    async def _request_specs_review(
+        self, run_id: str, question: str, options: list[str]
+    ) -> str:
+        """Emit a specs_review_request event and await the user's approve/revise answer (max 300s).
+
+        Uses the same clarification future mechanism as regular clarification so
+        the existing /runs/{run_id}/clarify endpoint can resolve it.
+        Transitions the run status to AWAITING_SPECS_REVIEW while blocked,
+        then back to RUNNING once the human responds.
+        """
+        future = self.store.request_clarification(run_id)
+        # Extract specs content embedded by architect_node after the sentinel
+        _sentinel = "\n\n===SPECS_CONTENT===\n"
+        if _sentinel in question:
+            display_question, specs_content = question.split(_sentinel, 1)
+        else:
+            display_question = question
+            specs_content = ""
+        self.store.update_status(run_id, RunStatus.AWAITING_SPECS_REVIEW)
+        await self._emit(
+            run_id,
+            "specs_review_request",
+            display_question,
+            agent="architect",
+            phase="specs_review",
+            payload={
+                "question": display_question,
+                "options": options,
+                "specs": specs_content,
+            },
+        )
+        try:
+            answer = await asyncio.wait_for(future, timeout=300.0)
+        except (TimeoutError, asyncio.CancelledError):
+            # TimeoutError: user didn't respond in time → treat as empty (auto-approve).
+            # CancelledError: run was cancelled while waiting → return empty so the
+            #   caller returns and the cancel token propagates RunCancelledError.
+            answer = ""
+        finally:
+            record_after = self.store.get_run(run_id)
+            if (
+                record_after is not None
+                and record_after.status == RunStatus.AWAITING_SPECS_REVIEW
+            ):
+                self.store.update_status(run_id, RunStatus.RUNNING)
+        return answer
 
     async def _request_tool_call(
         self,
@@ -210,9 +306,9 @@ class OrchestratorService:
     ) -> Callable[[str, list[str] | None], str]:
         """Return a sync callable that can be called from the graph worker thread.
 
-        When a WebSocket client is subscribed, emits a clarification_request event
-        and waits for the answer. Falls back to stdin when running interactively
-        with no WebSocket client connected (CLI mode).
+        When a WebSocket client is subscribed, emits a clarification_request (or
+        specs_review_request) event and waits for the answer. Falls back to stdin
+        when running interactively with no WebSocket client connected (CLI mode).
         """
         svc = self
 
@@ -220,9 +316,19 @@ class OrchestratorService:
             question: str, options: list[str] | None = None
         ) -> str:
             if svc.store.has_subscribers(run_id):
-                coro = svc._request_clarification(
-                    run_id, question, options or []
-                )
+                # Route to the correct event type based on sentinel prefix
+                if question.startswith(svc._SPECS_REVIEW_PREFIX):
+                    coro = svc._request_specs_review(
+                        run_id, question, options or []
+                    )
+                elif question.startswith(svc._ITERATION_REVIEW_PREFIX):
+                    coro = svc._request_iteration_review(
+                        run_id, question, options or []
+                    )
+                else:
+                    coro = svc._request_clarification(
+                        run_id, question, options or []
+                    )
                 future = asyncio.run_coroutine_threadsafe(coro, loop)
                 try:
                     return future.result(timeout=305.0)
@@ -241,22 +347,44 @@ class OrchestratorService:
     def _make_emit_fn(
         self, run_id: str, loop: asyncio.AbstractEventLoop
     ) -> Callable[[dict], None]:
-        """Return a sync callable that immediately emits an agent_update event from node threads."""
+        """Return a sync callable that emits events from node worker threads.
+
+        Handles two event types based on the ``event`` key in the log dict:
+        - ``file_generated``: streams a generated file to the UI immediately.
+        - anything else (default): emits an ``agent_update`` event.
+        """
         svc = self
 
         def _emit_sync(log: dict) -> None:
-            coro = svc._emit(
-                run_id=run_id,
-                event="agent_update",
-                message=log.get("content", "Agent update"),
-                agent=log.get("agent"),
-                phase=log.get("phase"),
-                payload={
-                    **log,
-                    "thinking": log.get("thinking", ""),
-                    "has_thinking": bool(log.get("thinking", "")),
-                },
-            )
+            event_type = log.get("event", "agent_update")
+            if event_type == "file_generated":
+                coro = svc._emit(
+                    run_id=run_id,
+                    event="file_generated",
+                    message=log.get(
+                        "message", f"Generated: {log.get('path', '')}"
+                    ),
+                    agent=log.get("agent", "developer"),
+                    phase=log.get("phase", "CONSTRUCTION"),
+                    payload={
+                        "path": log.get("path", ""),
+                        "content": log.get("content", ""),
+                        "language": log.get("language", "text"),
+                    },
+                )
+            else:
+                coro = svc._emit(
+                    run_id=run_id,
+                    event="agent_update",
+                    message=log.get("content", "Agent update"),
+                    agent=log.get("agent"),
+                    phase=log.get("phase"),
+                    payload={
+                        **log,
+                        "thinking": log.get("thinking", ""),
+                        "has_thinking": bool(log.get("thinking", "")),
+                    },
+                )
             asyncio.run_coroutine_threadsafe(coro, loop)
 
         return _emit_sync
@@ -348,8 +476,12 @@ class OrchestratorService:
             "emit_callback": emit_fn,
             "tool_call_callback": tool_call_fn,
             "reasoning_logs": [],
-            # Learning mode fields
-            "learning_mode": request.learning_mode,
+            # Specs review gate fields
+            "specs_approved": False,
+            "specs_revision_feedback": "",
+            "awaiting_specs_approval": False,
+            # Senior prompt queue
+            "senior_prompt_queue": [],
             "golden_files": [],
             "exercise_files": [],
             "learning_objectives": [],
@@ -413,55 +545,82 @@ class OrchestratorService:
 
                     final_state = self._merge_state(final_state, node_update)
 
+                    # After architect: emit specs + diagrams so UI can display them
+                    if node_name == "architect":
+                        diagrams = node_update.get("diagrams", "")
+                        specs = node_update.get("specs", "")
+                        if diagrams or specs:
+                            await self._emit(
+                                run_id=run_id,
+                                event="architect_done",
+                                message="Architecture design complete.",
+                                agent="architect",
+                                phase="design",
+                                payload={
+                                    "specs": specs,
+                                    "diagrams": diagrams,
+                                    "scope": node_update.get("scope", ""),
+                                },
+                            )
+
                     # After developer: notify UI of generated files
                     if node_name == "developer" and node_update.get(
                         "code_files"
                     ):
+                        is_junior_mode = final_state.get("mode") == "junior"
                         dev_files = node_update["code_files"]
                         project_dir_node = (
                             run_output_dir / "output" / "project"
                         ).resolve()
                         emitted_paths: list[str] = []
 
-                        for cf in dev_files:
-                            p = cf["path"] if isinstance(cf, dict) else cf.path
-                            c = (
-                                cf["content"]
-                                if isinstance(cf, dict)
-                                else cf.content
-                            )
-                            lang = (
-                                cf.get("language", "text")
-                                if isinstance(cf, dict)
-                                else cf.language
-                            )
-                            if p:
-                                emitted_paths.append(str(project_dir_node / p))
+                        if is_junior_mode:
                             await self._emit(
                                 run_id=run_id,
-                                event="file_generated",
-                                message=f"Generated: {p}",
+                                event="agent_update",
+                                message=(
+                                    "Developer produced candidate files; "
+                                    "withholding direct delivery in junior mode "
+                                    "until exercise packaging completes."
+                                ),
                                 agent="developer",
                                 phase="CONSTRUCTION",
                                 payload={
-                                    "path": p,
-                                    "content": c,
-                                    "language": lang,
+                                    "withheld_files_count": len(dev_files),
+                                    "iteration": final_state.get(
+                                        "iteration", 0
+                                    ),
                                 },
                             )
+                        else:
+                            # Files were already streamed in real-time via emit_callback
+                            # inside _run_code_generation. Just build emitted_paths and
+                            # fire files_ready so the UI knows generation is complete.
+                            for cf in dev_files:
+                                p = (
+                                    cf["path"]
+                                    if isinstance(cf, dict)
+                                    else cf.path
+                                )
+                                if p:
+                                    emitted_paths.append(
+                                        str(project_dir_node / p)
+                                    )
 
-                        await self._emit(
-                            run_id=run_id,
-                            event="files_ready",
-                            message=f"{len(emitted_paths)} file(s) written — review before QA continues",
-                            agent="developer",
-                            phase="CONSTRUCTION",
-                            payload={
-                                "project_dir": str(project_dir_node),
-                                "generated_files": emitted_paths,
-                                "iteration": final_state.get("iteration", 0),
-                            },
-                        )
+                            await self._emit(
+                                run_id=run_id,
+                                event="files_ready",
+                                message=f"{len(emitted_paths)} file(s) ready",
+                                agent="developer",
+                                phase="CONSTRUCTION",
+                                payload={
+                                    "project_dir": str(project_dir_node),
+                                    "generated_files": emitted_paths,
+                                    "iteration": final_state.get(
+                                        "iteration", 0
+                                    ),
+                                },
+                            )
 
                     # After exercise_generator: save exercise files to disk + emit event
                     if node_name == "exercise_generator":
@@ -505,6 +664,38 @@ class OrchestratorService:
                             f if isinstance(f, dict) else f.model_dump()
                             for f in exercise_files
                         ]
+
+                        # Junior mode file delivery happens only here, after stripping.
+                        for ef in serialized:
+                            await self._emit(
+                                run_id=run_id,
+                                event="file_generated",
+                                message=f"Exercise generated: {ef.get('path', '')}",
+                                agent="exercise_generator",
+                                phase="LEARNING",
+                                payload={
+                                    "path": ef.get("path", ""),
+                                    "content": ef.get("content", ""),
+                                    "language": ef.get("language", "text"),
+                                },
+                            )
+
+                        await self._emit(
+                            run_id=run_id,
+                            event="files_ready",
+                            message=(
+                                f"{len(exercise_paths)} exercise file(s) ready "
+                                "for implementation"
+                            ),
+                            agent="exercise_generator",
+                            phase="LEARNING",
+                            payload={
+                                "project_dir": str(exercise_dir),
+                                "generated_files": exercise_paths,
+                                "iteration": final_state.get("iteration", 0),
+                            },
+                        )
+
                         await self._emit(
                             run_id=run_id,
                             event="exercise_ready",
@@ -564,16 +755,17 @@ class OrchestratorService:
 
             project_dir = (run_output_dir / "output" / "project").resolve()
             generated_files: list[str] = []
-            for code_file in final_state.get("code_files", []):
-                rel_path = (
-                    code_file.get("path", "")
-                    if isinstance(code_file, dict)
-                    else code_file.path
-                )
-                if rel_path:
-                    generated_files.append(
-                        str((project_dir / rel_path).resolve())
+            if final_state.get("mode") != "junior":
+                for code_file in final_state.get("code_files", []):
+                    rel_path = (
+                        code_file.get("path", "")
+                        if isinstance(code_file, dict)
+                        else code_file.path
                     )
+                    if rel_path:
+                        generated_files.append(
+                            str((project_dir / rel_path).resolve())
+                        )
 
             # Exclude non-serialisable fields before JSON-encoding the state
             serialisable_state = {
@@ -596,7 +788,7 @@ class OrchestratorService:
             self.store.set_result(run_id, result)
 
             # Learning mode: pause and wait for junior's submission
-            if final_state.get("learning_mode") and final_state.get(
+            if final_state.get("mode") == "junior" and final_state.get(
                 "exercise_files"
             ):
                 self.store.update_status(run_id, RunStatus.AWAITING_SUBMISSION)

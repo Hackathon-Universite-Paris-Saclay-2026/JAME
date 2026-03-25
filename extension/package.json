@@ -52,6 +52,11 @@
       {
         "command": "jameWorkflow.discardAll",
         "title": "JAME: Discard All Proposed Changes"
+      },
+      {
+        "command": "jameWorkflow.searchReplaceSmart",
+        "title": "JAME: Smart Search & Replace",
+        "icon": "$(replace-all)"
       }
     ],
     "menus": {

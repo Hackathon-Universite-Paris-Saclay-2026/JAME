@@ -74,9 +74,19 @@ class InMemoryRunStore:
         self._chunk_queues[run_id] = chunk_queue
 
     def cancel_run(self, run_id: str) -> bool:
-        """Cancel a running (or pending) run — fires the token AND unblocks the async queue immediately."""
+        """Cancel a running (or pending) run — fires the token AND unblocks the async queue immediately.
+
+        Also handles the AWAITING_SPECS_REVIEW state where the pipeline is blocked
+        waiting for human approval: cancels the clarification future so the architect
+        unblocks, then fires the cancel token so the run terminates cleanly.
+        """
         record = self._runs.get(run_id)
-        if record and record.status in (RunStatus.RUNNING, RunStatus.PENDING):
+        cancellable = (
+            RunStatus.RUNNING,
+            RunStatus.PENDING,
+            RunStatus.AWAITING_SPECS_REVIEW,
+        )
+        if record and record.status in cancellable:
             self._cancelled.add(run_id)
             token = self._tokens.get(run_id)
             if token:
@@ -86,6 +96,11 @@ class InMemoryRunStore:
             queue = self._chunk_queues.get(run_id)
             if queue:
                 queue.put_nowait(("cancelled", None))
+            # If blocked waiting for specs approval, unblock the clarification future
+            # so the architect thread doesn't hang indefinitely.
+            future = self._clarification_futures.pop(run_id, None)
+            if future and not future.done():
+                future.cancel()
             return True
         return False
 
