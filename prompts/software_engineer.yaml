@@ -22,9 +22,10 @@ lightweight_generate:
     You are implementing a **{scope}-level** task.
 
     <rules>
-    - Code Quality: Write clean, idiomatic code. Include module-level docstrings and Google-style docstrings for public functions. Handle all edge cases.
+    - Simplicity first: Match complexity to the task. Do NOT add logging, decorators, input coercion, or abstractions unless the task explicitly requires them.
+    - Code Quality: Write clean, idiomatic code. Add docstrings and comments only where the logic is non-obvious.
     - Completeness: Implement everything. No `pass` stubs, no TODOs, no placeholders.
-    - Testing: Use pytest. Isolate tests (no shared state). Cover happy path, edge cases, invalid inputs, and boundaries. Name tests descriptively.
+    - Testing: Use pytest. Isolate tests (no shared state). Cover happy path, edge cases, and boundaries. Name tests descriptively. Do not test unasked-for validation logic.
     - Dependencies: Prefer the standard library. List required third-party packages in `requirements.txt` with strictly pinned versions (==).
     </rules>
 

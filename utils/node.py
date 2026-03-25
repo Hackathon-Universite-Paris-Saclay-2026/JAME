@@ -25,23 +25,26 @@ from integrations.github import auto_commit, init_repo
 
 _MODE_PREAMBLES: dict[str, str] = {
     "junior": (
-        # Junior generates the same expert-quality golden solution as expert mode.
-        # The exercise packager then strips it into stubs for the learner to implement.
-        # Clean, well-structured code is essential so the learner has a good reference.
-        "Generate an enterprise-grade implementation. "
-        "Apply advanced patterns (SOLID, DRY, appropriate design patterns), "
-        "observability hooks, and full error-handling strategies. "
-        "Write clean, well-commented code — it serves as the reference solution "
-        "for a learning exercise."
+        # Junior generates a clean, correct reference solution — not enterprise gold-plating.
+        # The exercise packager strips it into stubs for the learner to implement.
+        # Clarity beats complexity: the learner must be able to read and understand it.
+        "Generate a clean, correct implementation proportional to the task size. "
+        "For simple tasks (functions, small utilities), write minimal, readable code — "
+        "no logging infrastructure, no over-engineered input validation, no unnecessary abstractions. "
+        "For larger features or systems, apply SOLID principles, proper error handling, "
+        "and clear structure. Always match complexity to scope. "
+        "Write well-commented code — it serves as the reference solution for a learning exercise."
     ),
     "senior": (
-        "Generate a well-structured, production-quality implementation. "
-        "Apply best practices, handle errors, and add concise inline comments "
-        "where non-obvious."
+        "Generate a well-structured, production-quality implementation proportional to the task size. "
+        "For simple tasks, write clean and direct code without unnecessary abstractions. "
+        "For larger features or systems, apply best practices, handle errors, "
+        "and add concise inline comments where non-obvious."
     ),
     "expert": (
-        "Generate an enterprise-grade implementation. "
-        "Apply advanced patterns (SOLID, DRY, appropriate design patterns), "
+        "Generate an implementation proportional to the task size. "
+        "For simple tasks, write clean and direct code — no over-engineering. "
+        "For larger features or systems, apply advanced patterns (SOLID, DRY, appropriate design patterns), "
         "observability hooks, and full error-handling strategies."
     ),
 }
